@@ -87,7 +87,7 @@ class ExperimentTree:
         if not candidates:
             return None
         return max(candidates, key=lambda n: (
-            n.primary_metric() if higher_is_better else -(n.primary_metric() or 0)
+            (n.primary_metric() or 0) if higher_is_better else -(n.primary_metric() or 0)
         ))
 
     def update_node(self, node: ExperimentNode) -> None:
