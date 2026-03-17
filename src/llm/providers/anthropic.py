@@ -1,36 +1,36 @@
 from __future__ import annotations
-from typing import Optional
-import anthropic
+from typing import List
+from src.llm.backend import LLMBackend, Message
 
 
-class AnthropicBackend:
-    def __init__(self, model: str, api_key: str):
-        self._model = model
-        self._client = anthropic.Anthropic(api_key=api_key)
+class AnthropicBackend(LLMBackend):
+    def __init__(self, model: str, client) -> None:
+        self.model = model
+        self._client = client
 
     def complete(
         self,
-        messages: list[dict],
+        messages: List[Message],
         temperature: float = 0.7,
-        response_format: Optional[dict] = None,
+        max_tokens: int = 4096,
     ) -> str:
-        # Anthropic requires system message separate from messages list
-        system = None
-        filtered = []
-        for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
+        # Anthropic API: system message is a top-level kwarg, not in messages list
+        system_content = ""
+        api_messages = []
+        for msg in messages:
+            if msg.role == "system":
+                system_content = msg.content
             else:
-                filtered.append(m)
+                api_messages.append({"role": msg.role, "content": msg.content})
 
         kwargs = dict(
-            model=self._model,
-            max_tokens=4096,
-            messages=filtered,
+            model=self.model,
+            max_tokens=max_tokens,
             temperature=temperature,
+            messages=api_messages,
         )
-        if system:
-            kwargs["system"] = system
+        if system_content:
+            kwargs["system"] = system_content
 
         response = self._client.messages.create(**kwargs)
         return response.content[0].text

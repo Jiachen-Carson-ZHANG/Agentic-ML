@@ -1,24 +1,36 @@
 from __future__ import annotations
-from typing import Optional, runtime_checkable, Protocol
+from typing import List, Optional
+from pydantic import BaseModel
 
 
-@runtime_checkable
-class LLMBackend(Protocol):
+class Message(BaseModel):
+    role: str   # "system" | "user" | "assistant"
+    content: str
+
+
+class LLMBackend:
+    """Base class for LLM backends. Subclass and implement complete()."""
+
     def complete(
         self,
-        messages: list[dict],
+        messages: List[Message],
         temperature: float = 0.7,
-        response_format: Optional[dict] = None,
-    ) -> str: ...
+        max_tokens: int = 4096,
+    ) -> str:
+        raise NotImplementedError
 
 
 def create_backend(provider: str, model: str, api_key: str) -> LLMBackend:
-    """Factory — returns the correct LLMBackend for the given provider."""
+    """Factory: returns the correct LLMBackend for the given provider."""
     if provider == "anthropic":
         from src.llm.providers.anthropic import AnthropicBackend
-        return AnthropicBackend(model=model, api_key=api_key)
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        return AnthropicBackend(model=model, client=client)
     elif provider == "openai":
         from src.llm.providers.openai import OpenAIBackend
-        return OpenAIBackend(model=model, api_key=api_key)
+        import openai
+        client = openai.OpenAI(api_key=api_key)
+        return OpenAIBackend(model=model, client=client)
     else:
         raise ValueError(f"Unknown provider: {provider!r}. Choose 'anthropic' or 'openai'.")
