@@ -77,7 +77,7 @@ def test_distill_computes_traits_locally():
         target_column="label", eval_metric="roc_auc",
         description="test task", constraints={},
     )
-    profile = DataProfile(n_rows=200, n_features=5, class_balance_ratio=0.3, missing_rate=0.0)
+    profile = DataProfile(n_rows=200, n_features=5, class_balance_ratio=0.5, missing_rate=0.0)
     runs = [_make_run_entry("run_0001", 0.83, ["GBM"])]
 
     distiller = Distiller(llm=mock_llm)
@@ -85,4 +85,4 @@ def test_distill_computes_traits_locally():
 
     assert case.task_traits.task_type == "binary"
     assert case.task_traits.n_rows_bucket == "small"   # 200 < 1000
-    assert case.task_traits.class_balance == "moderate"  # 0.3
+    assert case.task_traits.class_balance == "moderate"  # 0.5 is in [0.4, 0.8) → moderate

@@ -19,6 +19,6 @@ def features_bucket(n: int) -> str:
 def balance_bucket(ratio: float) -> str:
     if ratio >= 0.8:
         return "balanced"
-    if ratio >= 0.3:
+    if ratio >= 0.4:
         return "moderate"
     return "severe"
