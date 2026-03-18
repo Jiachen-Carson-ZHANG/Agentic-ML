@@ -74,7 +74,6 @@ def main():
     higher_is_better = search.get("higher_is_better", {}).get(eval_metric, True)
 
     # Session
-    seed_ideas = load_seed_ideas()
     session = ExperimentSession(
         task=task,
         llm=llm,
@@ -82,7 +81,7 @@ def main():
         num_candidates=num_candidates,
         max_optimize_iterations=max_optimize,
         higher_is_better=higher_is_better,
-        seed_ideas=seed_ideas,
+        case_store_path=config["session"].get("case_store_path"),
     )
 
     session.run()

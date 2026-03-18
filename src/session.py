@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import os
 import uuid
 import pandas as pd
@@ -8,7 +9,7 @@ from typing import List, Optional, Dict, Any
 
 from src.models.task import TaskSpec, ExperimentPlan, RunConfig
 from src.models.results import DataProfile, RunEntry, RunResult, RunDiagnostics
-from src.models.nodes import ExperimentNode, NodeStage, NodeStatus, SearchContext
+from src.models.nodes import ExperimentNode, NodeStage, NodeStatus, SearchContext, TaskTraits
 from src.llm.backend import LLMBackend
 from src.memory.run_store import RunStore
 from src.orchestration.state import ExperimentTree
@@ -19,6 +20,12 @@ from src.agents.selector import SelectorAgent
 from src.execution.config_mapper import ConfigMapper
 from src.execution.autogluon_runner import AutoGluonRunner
 from src.execution.result_parser import ResultParser
+from src.memory.case_store import CaseStore
+from src.memory.retrieval import CaseRetriever
+from src.memory.distiller import Distiller
+from src.memory.context_builder import ContextBuilder
+from src.agents.ideator import IdeatorAgent
+from src.memory.trait_utils import rows_bucket, features_bucket, balance_bucket
 
 
 class ExperimentSession:
@@ -36,15 +43,28 @@ class ExperimentSession:
         max_optimize_iterations: int = 5,
         higher_is_better: bool = True,
         seed_ideas: Optional[List[Dict[str, str]]] = None,
+        case_store_path: Optional[str] = None,
     ) -> None:
         self.task = task
         self._llm = llm
         self._higher_is_better = higher_is_better
 
         # Session output directory
-        session_name = f"{datetime.now().strftime('%Y-%m-%d')}_{task.task_name}"
+        session_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{task.task_name}"
         self._session_dir = Path(experiments_dir) / session_name
         self._session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Session logger — writes to both stdout and session.log
+        self._log = logging.getLogger(f"session.{task.task_name}")
+        self._log.setLevel(logging.DEBUG)
+        if not self._log.handlers:
+            fmt = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+            sh = logging.StreamHandler()
+            sh.setFormatter(fmt)
+            fh = logging.FileHandler(self._session_dir / "session.log", mode="a")
+            fh.setFormatter(fmt)
+            self._log.addHandler(sh)
+            self._log.addHandler(fh)
 
         # Core components
         self.run_store = RunStore(self._session_dir / "decisions.jsonl")
@@ -57,7 +77,11 @@ class ExperimentSession:
         self._manager = ExperimentManager(llm=llm)
         self._selector = SelectorAgent(llm=llm)
         self._runner = AutoGluonRunner(target_column=task.target_column)
-        self._seed_ideas = seed_ideas or []
+        self._case_store = CaseStore(case_store_path) if case_store_path else None
+        self._retriever = CaseRetriever()
+        self._distiller = Distiller(llm=llm)
+        self._context_builder = ContextBuilder()
+        self._ideator = IdeatorAgent(llm=llm, num_hypotheses=num_candidates)
         self._run_counter = 0
 
     def profile_data(self) -> DataProfile:
@@ -169,33 +193,48 @@ class ExperimentSession:
         4. Optimize: refine the incumbent
         5. Return best RunEntry
         """
-        print(f"\n{'='*60}")
-        print(f"Session: {self.task.task_name}")
-        print(f"{'='*60}\n")
+        self._log.info("=" * 60)
+        self._log.info("Session: %s", self.task.task_name)
+        self._log.info("=" * 60)
 
         # Step 1: Profile data
         data_profile = self.profile_data()
-        print(f"Data profile: {data_profile.summary}")
+        self._log.info("Data profile: %s", data_profile.summary)
 
         # Step 2: Load hypotheses
-        hyps = hypotheses or self._seed_ideas
-        if not hyps:
-            hyps = [{"hypothesis": "Try GBM baseline with default settings", "rationale": "Safe default"}]
+        # Retrieve similar past cases for grounding
+        similar_cases = []
+        if self._case_store:
+            query_traits = TaskTraits(
+                task_type=self.task.task_type,
+                n_rows_bucket=rows_bucket(data_profile.n_rows),
+                n_features_bucket=features_bucket(data_profile.n_features),
+                class_balance=balance_bucket(data_profile.class_balance_ratio),
+                feature_types=data_profile.feature_types,
+            )
+            similar_cases = self._retriever.rank(query_traits, self._case_store.get_all(), top_k=3)
+            self._log.info("Retrieved %d similar past cases", len(similar_cases))
+
+        hyps = hypotheses or self._ideator.ideate(
+            task=self.task,
+            data_profile=data_profile,
+            similar_cases=similar_cases,
+        )
 
         # Step 3: Create candidate root nodes
-        print(f"\nCreating {len(hyps)} candidate nodes...")
+        self._log.info("Creating %d candidate nodes...", len(hyps))
         candidate_nodes = self.create_candidate_nodes(hyps, data_profile)
 
         # Step 4: Warm-up loop
-        print(f"\n--- WARM-UP PHASE ({len(candidate_nodes)} candidates) ---")
+        self._log.info("--- WARM-UP PHASE (%d candidates) ---", len(candidate_nodes))
         for node in candidate_nodes:
-            print(f"  Running candidate: {node.node_id} | metric={node.plan.eval_metric}")
+            self._log.info("Running candidate: %s | metric=%s", node.node_id, node.plan.eval_metric)
             entry = self.execute_node(node, data_profile)
             fresh_node = self.tree.get_node(node.node_id)
             self.scheduler.record_warmup_run(fresh_node)
             metric = entry.result.primary_metric
             status = entry.result.status
-            print(f"  → {status} | primary_metric={metric}")
+            self._log.info("  → %s | primary_metric=%s", status, metric)
 
         if self.scheduler.should_advance_to_optimization():
             self.scheduler.advance_to_optimization()
@@ -203,14 +242,16 @@ class ExperimentSession:
         # Step 5: Optimization loop
         incumbent = self.tree.get_incumbent(higher_is_better=self._higher_is_better)
         if incumbent is None:
-            print("\nNo valid incumbent after warm-up. Stopping.")
+            self._log.warning("No valid incumbent after warm-up. Stopping.")
             return None
 
-        print(f"\n--- OPTIMIZE PHASE | incumbent={incumbent.node_id} "
-              f"metric={incumbent.primary_metric():.4f} ---")
+        self._log.info(
+            "--- OPTIMIZE PHASE | incumbent=%s metric=%.4f ---",
+            incumbent.node_id, incumbent.primary_metric(),
+        )
 
         while not self.scheduler.should_stop():
-            context = SearchContext(
+            context = self._context_builder.build(
                 task=self.task,
                 data_profile=data_profile,
                 history=self.run_store.get_history(),
@@ -219,13 +260,12 @@ class ExperimentSession:
                 stage="optimize",
                 budget_remaining=self.scheduler.max_optimize_iterations - self.scheduler._optimize_count,
                 budget_used=self.scheduler._optimize_count,
-                similar_cases=[],
-                failed_attempts=self.run_store.get_failed(),
+                similar_cases=similar_cases,
             )
 
             action = self._manager.next_action(context)
             if action.action_type == ActionType.STOP:
-                print(f"  Manager says STOP: {action.reason}")
+                self._log.info("Manager says STOP: %s", action.reason)
                 break
 
             # Use selector to propose refinement (refiner agent added in Phase 3)
@@ -247,7 +287,7 @@ class ExperimentSession:
                 stage=NodeStage.OPTIMIZE,
             )
 
-            print(f"  Optimize run {self.scheduler._optimize_count + 1}: {child_node.node_id}")
+            self._log.info("Optimize run %d: %s", self.scheduler._optimize_count + 1, child_node.node_id)
             entry = self.execute_node(child_node, data_profile)
             fresh_child = self.tree.get_node(child_node.node_id)
             self.scheduler.record_optimize_run()
@@ -255,19 +295,37 @@ class ExperimentSession:
             accepted = self._accept_reject.evaluate(incumbent, fresh_child)
             if accepted:
                 incumbent = fresh_child
-                print(f"  → ACCEPTED | metric={fresh_child.primary_metric()}")
+                self._log.info("  → ACCEPTED | metric=%s", fresh_child.primary_metric())
             else:
-                print(f"  → REJECTED | metric={fresh_child.primary_metric()} "
-                      f"(no improvement over {incumbent.primary_metric()})")
+                self._log.info(
+                    "  → REJECTED | metric=%s (no improvement over %s)",
+                    fresh_child.primary_metric(), incumbent.primary_metric(),
+                )
 
         # Save tree
         self.tree.save(self._session_dir / "tree.json")
 
+        if self._case_store:
+            self._log.info("Distilling session into CaseStore...")
+            try:
+                case = self._distiller.distill(
+                    task=self.task,
+                    data_profile=data_profile,
+                    run_history=self.run_store.get_history(),
+                )
+                self._case_store.add(case)
+                self._log.info("Session distilled → case_id=%s", case.case_id)
+            except Exception as e:
+                self._log.warning("Distillation failed (non-fatal): %s", e)
+
         best_entry = self.run_store.get_incumbent(self._higher_is_better)
         if best_entry:
-            print(f"\n{'='*60}")
-            print(f"Best result: {best_entry.result.primary_metric:.4f} "
-                  f"({self.task.eval_metric})")
-            print(f"Best model: {best_entry.result.best_model_name}")
-            print(f"{'='*60}\n")
+            self._log.info("=" * 60)
+            self._log.info(
+                "Best result: %.4f (%s) | model: %s",
+                best_entry.result.primary_metric,
+                self.task.eval_metric,
+                best_entry.result.best_model_name,
+            )
+            self._log.info("=" * 60)
         return best_entry
