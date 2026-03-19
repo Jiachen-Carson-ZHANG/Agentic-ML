@@ -1,3 +1,20 @@
+## 2026-03-20 — Phase 3: Principled Refinement
+
+**What changed:**
+- `ModelEntry` gains `score_train: Optional[float]`; `RunResult` gains `diagnostics_overfitting_gap: Optional[float]`
+- `ResultParser.from_predictor` calls `leaderboard(extra_info=True)` to capture train scores and compute `overfitting_gap = score_train - score_val`; falls back to basic leaderboard on failure
+- `session.execute_node` populates `RunDiagnostics.overfitting_gap` and `metric_vs_parent` after each run; `RunEntry` now carries `plan: Optional[ExperimentPlan]`
+- New `RefinerAgent` (`src/agents/refiner.py`) replaces the generic SelectorAgent call in the optimize loop; receives full incumbent state (config, leaderboard, overfitting_gap, prior runs) and produces a targeted one-step ExperimentPlan
+- `prompts/refiner.md` encodes 5 decision rules: overfitting → reduce complexity; homogeneous families → diversify; plateau → change validation; failed run → avoid those families; otherwise → add new family
+
+**Why:**
+The optimize loop called SelectorAgent with a generic "refine this config" string; the LLM had no access to what the incumbent config contained, which models trained, or whether overfitting was occurring. RefinerAgent gives the LLM the evidence it needs for principled decisions.
+
+**Must remain true:**
+- `leaderboard(extra_info=True)` failure falls back to basic leaderboard (overfitting_gap stays None — acceptable)
+- RefinerAgent, SelectorAgent, and IdeatorAgent all share the same retry + fence-strip pattern
+- `RunDiagnostics` fields remain Optional — never required for correctness, only improve agent decisions
+
 ## 2026-03-19 — Phase 2: Memory & Ideation
 
 **New modules:**

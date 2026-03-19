@@ -1,14 +1,14 @@
 # Architecture: Current State
 
-**Last updated:** 2026-03-19
-**Phase:** 2 (Memory & Ideation complete)
+**Last updated:** 2026-03-20
+**Phase:** 3 (Principled Refinement complete)
 
 ## Four-Layer Architecture
 
 ```
 +-----------------------------------------------------------+
 |  AGENT LAYER                                              |
-|  IdeatorAgent, SelectorAgent, ExperimentManager          |
+|  IdeatorAgent, SelectorAgent, RefinerAgent, ExperimentManager |
 |  IdeatorAgent: data profile + similar cases → hypotheses  |
 |  SelectorAgent: hypothesis → ExperimentPlan (JSON)        |
 |  ExperimentManager: warmup/optimize/stop routing          |
@@ -40,7 +40,7 @@
 2. Retrieve similar past cases from CaseStore (cosine similarity on TaskTraits)
 3. IdeatorAgent generates hypotheses grounded in data profile + similar cases
 4. Warm-up: run each hypothesis as root ExperimentNode
-5. Optimize: ContextBuilder assembles SearchContext → SelectorAgent refines (Phase 3: RefinerAgent)
+5. Optimize: RefinerAgent reads incumbent config + leaderboard + overfitting_gap → targeted ExperimentPlan
 6. AcceptReject gates each optimization step
 7. Distiller summarises session → CaseEntry → CaseStore
 8. Save tree.json (Graph RAG compatible)
@@ -70,10 +70,8 @@ experiments/{date}_{HH-MM-SS}_{task}/
 experiments/case_bank.jsonl  — cross-session CaseStore
 ```
 
-## What is NOT yet built (Phase 3+)
+## What is NOT yet built (Phase 4+)
 
-- RefinerAgent — principled config refinement from incumbent diagnostics
-- ReviewerAgent — run quality assessment (overfitting, leakage detection)
-- Richer ResultParser — feature importances, overfitting gap
+- ReviewerAgent — post-run quality assessment (Phase 4)
 - Optuna executor (Phase 4)
 - Graph RAG over ExperimentNode trees (Phase 5)
