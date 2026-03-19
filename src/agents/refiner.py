@@ -67,7 +67,7 @@ class RefinerAgent:
         task: TaskSpec,
         prior_runs: List[RunEntry],
     ) -> str:
-        families = incumbent.plan.model_families
+        families = incumbent.plan.model_families if incumbent.plan else []
         overfitting_gap = incumbent.diagnostics.overfitting_gap
         metric = incumbent.result.primary_metric
 

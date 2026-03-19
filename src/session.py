@@ -204,6 +204,7 @@ class ExperimentSession:
             result=result,
             diagnostics=diagnostics,
             agent_rationale=node.plan.rationale,
+            plan=node.plan,
         )
 
         # Populate diagnostics from result and parent
