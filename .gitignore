@@ -8,8 +8,10 @@ __pycache__/
 .venv/
 venv/
 
-# Experiments (large artifacts)
-experiments/*/runs/*/predictor/
+# Experiments — exclude binary ML artifacts, keep lightweight analysis files
+experiments/**/*.pkl
+experiments/**/models/
+experiments/**/utils/
 
 # IDE
 .vscode/

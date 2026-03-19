@@ -1,10 +1,34 @@
 from __future__ import annotations
+import logging
 import os
 import time
+import contextlib
 import pandas as pd
 from src.models.task import RunConfig
 from src.models.results import RunResult
 from src.execution.result_parser import ResultParser
+
+
+@contextlib.contextmanager
+def _log_to_file(log_path: str):
+    """Temporarily add a FileHandler to the autogluon logger and suppress stdout handlers."""
+    ag_logger = logging.getLogger("autogluon")
+    file_handler = logging.FileHandler(log_path, mode="w")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+    # Suppress stdout handlers on autogluon logger during fit
+    prev_handlers = ag_logger.handlers[:]
+    for h in prev_handlers:
+        ag_logger.removeHandler(h)
+    ag_logger.addHandler(file_handler)
+    try:
+        yield
+    finally:
+        ag_logger.removeHandler(file_handler)
+        file_handler.close()
+        for h in prev_handlers:
+            ag_logger.addHandler(h)
 
 
 class AutoGluonRunner:
@@ -25,12 +49,14 @@ class AutoGluonRunner:
 
         os.makedirs(config.output_dir, exist_ok=True)
         df = pd.read_csv(config.data_path)
+        log_path = os.path.join(config.output_dir, "training.log")
 
         kwargs = dict(config.autogluon_kwargs)
         kwargs["path"] = config.output_dir
 
         predictor = TabularPredictor(
             label=self.target_column,
+            verbosity=1,  # minimal stdout; full details go to training.log
             **{k: v for k, v in kwargs.items()
                if k in ("eval_metric", "path", "problem_type")}
         )
@@ -40,7 +66,8 @@ class AutoGluonRunner:
 
         start = time.time()
         try:
-            predictor.fit(df, **fit_kwargs)
+            with _log_to_file(log_path):
+                predictor.fit(df, **fit_kwargs)
         except Exception as e:
             return ResultParser.from_error(
                 run_id=config.run_id,
