@@ -11,6 +11,7 @@ class ModelEntry(BaseModel):
     fit_time: float
     pred_time: float
     stack_level: int = 1
+    score_train: Optional[float] = None
 
 
 class RunResult(BaseModel):
@@ -23,6 +24,7 @@ class RunResult(BaseModel):
     artifacts_dir: str = ""
     error: Optional[str] = None
     raw_info: Dict[str, Any] = Field(default_factory=dict)
+    diagnostics_overfitting_gap: Optional[float] = None
 
 
 class DataProfile(BaseModel):
