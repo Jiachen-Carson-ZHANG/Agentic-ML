@@ -206,6 +206,18 @@ class ExperimentSession:
             agent_rationale=node.plan.rationale,
         )
 
+        # Populate diagnostics from result and parent
+        if result.status == "success":
+            parent_node = self.tree.get_node(node.parent_id) if node.parent_id else None
+            parent_metric = parent_node.primary_metric() if parent_node and parent_node.has_result() else None
+            metric_vs_parent = None
+            if parent_metric is not None and result.primary_metric is not None:
+                metric_vs_parent = round(result.primary_metric - parent_metric, 4)
+            entry.diagnostics = RunDiagnostics(
+                overfitting_gap=result.diagnostics_overfitting_gap,
+                metric_vs_parent=metric_vs_parent,
+            )
+
         self.run_store.append(entry)
 
         new_status = NodeStatus.SUCCESS if result.status == "success" else NodeStatus.FAILED
