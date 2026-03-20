@@ -60,6 +60,14 @@ class CampaignOrchestrator:
         self._higher_is_better = higher_is_better
         self._case_store_path = case_store_path
         self._executor = PreprocessingExecutor()
+        self._log = logging.getLogger(f"campaign.{task.task_name}")
+        self._log.setLevel(logging.DEBUG)
+        if not self._log.handlers:
+            # Note: campaign dir isn't known yet at __init__ time, so FileHandler is added in run()
+            fmt = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+            sh = logging.StreamHandler()
+            sh.setFormatter(fmt)
+            self._log.addHandler(sh)
 
     def run(self) -> CampaignResult:
         campaign_id = str(uuid.uuid4())[:8]
@@ -68,29 +76,24 @@ class CampaignOrchestrator:
         sessions_dir = campaign_dir / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
-        # Campaign-level logger: writes to both stdout and campaign.log
-        log = logging.getLogger(f"campaign.{campaign_id}")
-        log.setLevel(logging.DEBUG)
-        if not log.handlers:
-            fmt = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
-            sh = logging.StreamHandler()
-            sh.setFormatter(fmt)
+        # Add FileHandler once campaign_dir is known
+        if not any(isinstance(h, logging.FileHandler) for h in self._log.handlers):
             fh = logging.FileHandler(campaign_dir / "campaign.log", mode="a")
-            fh.setFormatter(fmt)
-            log.addHandler(sh)
-            log.addHandler(fh)
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
+            self._log.addHandler(fh)
 
-        log.info("=" * 60)
-        log.info(f"Campaign {campaign_id} | task={self._task.task_name} | max_sessions={self._config.max_sessions}")
-        log.info("=" * 60)
+        self._log.info("=" * 60)
+        self._log.info(f"Campaign {campaign_id} | task={self._task.task_name} | max_sessions={self._config.max_sessions}")
+        self._log.info("=" * 60)
 
         sessions: List[SessionSummary] = []
         metrics: List[float] = []
 
         for i in range(self._config.max_sessions):
-            log.info(f"--- Session {i + 1}/{self._config.max_sessions} ---")
+            self._log.info(f"--- Session {i + 1}/{self._config.max_sessions} ---")
             t_start = datetime.now()
             summary: Optional[SessionSummary] = None
+            session = None
 
             try:
                 plan = self._preprocessing_plan()
@@ -122,18 +125,20 @@ class CampaignOrchestrator:
                 )
                 if best_metric is not None:
                     metrics.append(best_metric)
-                    log.info(f"Session {i + 1} best: {best_metric:.4f}")
+                    self._log.info(f"Session {i + 1} best: {best_metric:.4f}")
                 else:
-                    log.warning(f"Session {i + 1}: no successful runs")
+                    self._log.warning(f"Session {i + 1}: no successful runs")
 
             except Exception as exc:
                 duration = (datetime.now() - t_start).total_seconds()
-                log.error(f"Session {i + 1} failed: {exc}")
+                self._log.error(f"Session {i + 1} failed: {exc}")
+                sid = str(session._session_dir.name) if session is not None else f"session_{i + 1}_failed"
+                sdir = str(session._session_dir) if session is not None else ""
                 summary = SessionSummary(
-                    session_id=f"session_{i + 1}_failed",
+                    session_id=sid,
                     best_metric=None,
                     preprocessing_strategy="identity",
-                    session_dir="",
+                    session_dir=sdir,
                     duration_seconds=duration,
                     error_message=str(exc),
                 )
@@ -144,14 +149,14 @@ class CampaignOrchestrator:
             self._save(partial, campaign_dir)
 
             if self._is_plateau(metrics):
-                log.info("Plateau detected — stopping campaign.")
+                self._log.info("Plateau detected — stopping campaign.")
                 result = self._build_result(campaign_id, started_at, sessions, "plateau")
                 self._save(result, campaign_dir)
                 return result
 
         result = self._build_result(campaign_id, started_at, sessions, "budget")
         self._save(result, campaign_dir)
-        log.info(f"Campaign complete: best={result.best_metric} | stopped={result.stopped_reason}")
+        self._log.info(f"Campaign complete: best={result.best_metric} | stopped={result.stopped_reason}")
         return result
 
     def _is_plateau(self, metrics: List[float]) -> bool:
@@ -182,9 +187,10 @@ class CampaignOrchestrator:
         best_metric = self._best_metric(metrics_with_values)
         best_session_id = None
         if best_metric is not None:
-            best_session_id = next(
-                s.session_id for s in sessions if s.best_metric == best_metric
-            )
+            best_session_id = max(
+                (s for s in sessions if s.best_metric is not None),
+                key=lambda s: s.best_metric if self._higher_is_better else -s.best_metric
+            ).session_id
         return CampaignResult(
             campaign_id=campaign_id,
             task_name=self._task.task_name,
