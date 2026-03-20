@@ -1,0 +1,46 @@
+"""
+Campaign-level data classes.
+
+Origin  : defined by CampaignOrchestrator (src/orchestration/campaign.py)
+Consumed: campaign.py entrypoint (display / persistence), future analysis tools
+"""
+from __future__ import annotations
+from typing import List, Literal, Optional
+from pydantic import BaseModel
+
+
+class CampaignConfig(BaseModel):
+    """
+    Hyper-parameters for the outer campaign loop.
+    All runs in a campaign share the same task and LLM.
+    """
+    max_sessions: int = 5
+    plateau_threshold: float = 0.002   # stop if best metric moves < this across plateau_window sessions
+    plateau_window: int = 3            # number of recent sessions to check for plateau
+
+
+class SessionSummary(BaseModel):
+    """
+    One row in the campaign log — one per completed session.
+    Written by CampaignOrchestrator after each session finishes.
+    """
+    session_id: str
+    best_metric: Optional[float]           # None if all runs failed
+    preprocessing_strategy: str = "identity"
+    session_dir: str                       # absolute path to session artifacts
+    duration_seconds: float
+    error_message: Optional[str] = None   # set if the session raised an exception
+
+
+class CampaignResult(BaseModel):
+    """
+    Full record of a completed campaign.
+    Saved to experiments/campaigns/{campaign_id}/campaign.json.
+    """
+    campaign_id: str
+    task_name: str
+    started_at: str                        # ISO 8601
+    sessions: List[SessionSummary]
+    best_metric: Optional[float]           # best across all sessions
+    best_session_id: Optional[str]
+    stopped_reason: Literal['plateau', 'budget']
