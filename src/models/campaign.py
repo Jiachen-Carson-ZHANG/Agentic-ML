@@ -25,7 +25,7 @@ class SessionSummary(BaseModel):
     Written by CampaignOrchestrator after each session finishes.
     """
     session_id: str
-    best_metric: Optional[float]           # None if all runs failed
+    best_metric: Optional[float] = None    # None if all runs failed
     preprocessing_strategy: str = "identity"
     session_dir: str                       # absolute path to session artifacts
     duration_seconds: float
@@ -42,5 +42,5 @@ class CampaignResult(BaseModel):
     started_at: str                        # ISO 8601
     sessions: List[SessionSummary]
     best_metric: Optional[float]           # best across all sessions
-    best_session_id: Optional[str]
+    best_session_id: Optional[str] = None
     stopped_reason: Literal['plateau', 'budget']
