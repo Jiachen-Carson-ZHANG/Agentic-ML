@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock
 from src.agents.refiner import RefinerAgent
 from src.models.task import ExperimentPlan, TaskSpec, RunConfig
-from src.models.results import RunResult, RunEntry, RunDiagnostics
+from src.models.results import RunResult, ExperimentRun, RunDiagnostics
 
 
 def _make_task():
@@ -34,7 +34,7 @@ def _make_incumbent(overfitting_gap=0.02, metric=0.87):
         primary_metric=metric,
     )
     diagnostics = RunDiagnostics(overfitting_gap=overfitting_gap)
-    return RunEntry(run_id="run_0001", node_id="node_abc", plan=plan, config=config, result=result, diagnostics=diagnostics)
+    return ExperimentRun(run_id="run_0001", node_id="node_abc", plan=plan, config=config, result=result, diagnostics=diagnostics)
 
 
 def _valid_plan_json():

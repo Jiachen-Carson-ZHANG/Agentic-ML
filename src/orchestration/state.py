@@ -91,7 +91,7 @@ class ExperimentTree:
         ))
 
     def update_node(self, node: ExperimentNode) -> None:
-        """Replace a node (e.g. after attaching RunEntry or changing status)."""
+        """Replace a node (e.g. after attaching ExperimentRun or changing status)."""
         self._nodes[node.node_id] = node
 
     def all_nodes(self) -> List[ExperimentNode]:

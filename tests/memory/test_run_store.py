@@ -5,10 +5,10 @@ from pathlib import Path
 from datetime import datetime
 from src.memory.run_store import RunStore
 from src.models.task import ExperimentPlan, RunConfig
-from src.models.results import RunResult, RunDiagnostics, RunEntry
+from src.models.results import RunResult, RunDiagnostics, ExperimentRun
 
 
-def make_run_entry(run_id: str, metric: float, status: str = "success") -> RunEntry:
+def make_run_entry(run_id: str, metric: float, status: str = "success") -> ExperimentRun:
     plan = ExperimentPlan(
         eval_metric="roc_auc", model_families=["GBM"], presets="medium_quality",
         time_limit=120, feature_policy={"exclude_columns": [], "include_columns": []},
@@ -26,12 +26,12 @@ def make_run_entry(run_id: str, metric: float, status: str = "success") -> RunEn
         best_model_name="GBM" if status == "success" else None,
         fit_time_seconds=10.0,
     )
-    return RunEntry(
+    return ExperimentRun(
         run_id=run_id, node_id="node_001",
         timestamp=datetime(2026, 3, 16, 12, 0, 0),
         config=config, result=result,
         diagnostics=RunDiagnostics(metric_vs_parent=0.05),
-        agent_rationale="test rationale", agent_review=""
+        agent_rationale="test rationale",
     )
 
 

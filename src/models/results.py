@@ -43,7 +43,12 @@ class RunDiagnostics(BaseModel):
     failure_mode: Optional[str] = None
 
 
-class RunEntry(BaseModel):
+class ExperimentRun(BaseModel):
+    """Complete record of one experiment run — the unit stored in decisions.jsonl.
+
+    Composite of: what the agent planned (plan), how it was translated to AutoGluon kwargs (config),
+    what AutoGluon returned (result), and what we computed afterward (diagnostics).
+    """
     run_id: str
     node_id: str
     timestamp: datetime = Field(default_factory=datetime.now)
@@ -52,4 +57,3 @@ class RunEntry(BaseModel):
     diagnostics: RunDiagnostics = Field(default_factory=RunDiagnostics)
     plan: Optional[ExperimentPlan] = None
     agent_rationale: str = ""
-    agent_review: str = ""

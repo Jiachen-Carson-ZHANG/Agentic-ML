@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 from src.models.nodes import SearchContext, ExperimentNode, CaseEntry
 from src.models.task import TaskSpec
-from src.models.results import DataProfile, RunEntry
+from src.models.results import DataProfile, ExperimentRun
 
 
 class ContextBuilder:
@@ -13,8 +13,8 @@ class ContextBuilder:
         self,
         task: TaskSpec,
         data_profile: DataProfile,
-        history: List[RunEntry],
-        incumbent: Optional[RunEntry],
+        history: List[ExperimentRun],
+        incumbent: Optional[ExperimentRun],
         current_node: ExperimentNode,
         stage: str,
         budget_remaining: int,

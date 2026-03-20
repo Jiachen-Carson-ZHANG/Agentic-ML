@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 from src.memory.distiller import Distiller
 from src.models.nodes import CaseEntry
 from src.models.task import TaskSpec, ExperimentPlan
-from src.models.results import DataProfile, RunEntry, RunResult, RunDiagnostics, RunConfig
+from src.models.results import DataProfile, ExperimentRun, RunResult, RunDiagnostics, RunConfig
 
 
-def _make_run_entry(run_id: str, metric: float, families: list) -> RunEntry:
+def _make_run_entry(run_id: str, metric: float, families: list) -> ExperimentRun:
     plan = ExperimentPlan(
         eval_metric="roc_auc", model_families=families, presets="medium_quality",
         time_limit=120, feature_policy={}, validation_policy={"holdout_frac": 0.2},
@@ -23,7 +23,7 @@ def _make_run_entry(run_id: str, metric: float, families: list) -> RunEntry:
         best_model_name="WeightedEnsemble_L2",
         fit_time_seconds=10.0,
     )
-    return RunEntry(
+    return ExperimentRun(
         run_id=run_id, node_id="n1", config=config, result=result,
         diagnostics=RunDiagnostics(), agent_rationale="test rationale",
     )

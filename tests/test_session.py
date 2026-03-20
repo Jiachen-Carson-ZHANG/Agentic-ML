@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 from src.session import ExperimentSession
 from src.models.task import TaskSpec, ExperimentPlan, RunConfig
-from src.models.results import DataProfile, RunResult, RunDiagnostics, RunEntry
+from src.models.results import DataProfile, RunResult, RunDiagnostics, ExperimentRun
 from src.models.nodes import NodeStage, NodeStatus
 from src.llm.backend import LLMBackend
 
@@ -87,7 +87,7 @@ def test_session_run_store_records_entry(tmp_path):
         experiments_dir=str(tmp_path / "experiments"),
         num_candidates=2, max_optimize_iterations=2
     )
-    # Build a minimal RunEntry and record it
+    # Build a minimal ExperimentRun and record it
     plan = ExperimentPlan(
         eval_metric="roc_auc", model_families=["GBM"], presets="medium_quality",
         time_limit=60, feature_policy={"exclude_columns": [], "include_columns": []},
@@ -97,7 +97,7 @@ def test_session_run_store_records_entry(tmp_path):
     config = RunConfig(autogluon_kwargs={}, data_path="d", output_dir="o")
     result = RunResult(status="success", primary_metric=0.85,
                       best_model_name="GBM", fit_time_seconds=5.0)
-    entry = RunEntry(run_id="r001", node_id="n001", config=config, result=result,
+    entry = ExperimentRun(run_id="r001", node_id="n001", config=config, result=result,
                     diagnostics=RunDiagnostics(), timestamp=datetime.now())
     session.run_store.append(entry)
     assert len(session.run_store.get_history()) == 1

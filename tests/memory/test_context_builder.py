@@ -3,7 +3,7 @@ import pytest
 from src.memory.context_builder import ContextBuilder
 from src.models.nodes import SearchContext, ExperimentNode, NodeStage
 from src.models.task import TaskSpec, ExperimentPlan
-from src.models.results import DataProfile, RunEntry, RunResult, RunDiagnostics, RunConfig
+from src.models.results import DataProfile, ExperimentRun, RunResult, RunDiagnostics, RunConfig
 
 
 def _make_node() -> ExperimentNode:
@@ -26,7 +26,7 @@ def _make_profile() -> DataProfile:
     return DataProfile(n_rows=891, n_features=10, class_balance_ratio=0.6, missing_rate=0.05)
 
 
-def _make_run(run_id: str, status: str, metric: float = None) -> RunEntry:
+def _make_run(run_id: str, status: str, metric: float = None) -> ExperimentRun:
     config = RunConfig(
         autogluon_kwargs={},
         data_path="data/train.csv",
@@ -37,7 +37,7 @@ def _make_run(run_id: str, status: str, metric: float = None) -> RunEntry:
         primary_metric=metric,
         fit_time_seconds=10.0,
     )
-    return RunEntry(run_id=run_id, node_id="n1", config=config,
+    return ExperimentRun(run_id=run_id, node_id="n1", config=config,
                     result=result, diagnostics=RunDiagnostics())
 
 

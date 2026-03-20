@@ -22,11 +22,13 @@ class IdeatorAgent:
         prompt_path: str = "prompts/ideator.md",
         num_hypotheses: int = 3,
         temperature: float = 0.5,
+        max_retries: int = 3,
     ) -> None:
         self._llm = llm
         self._system_prompt = Path(prompt_path).read_text()
         self._num_hypotheses = num_hypotheses
         self._temperature = temperature
+        self._max_retries = max_retries
 
     def ideate(
         self,
@@ -35,15 +37,33 @@ class IdeatorAgent:
         similar_cases: List[CaseEntry],
     ) -> List[Dict[str, str]]:
         user_msg = self._build_user_message(task, data_profile, similar_cases)
-        response = self._llm.complete(
-            messages=[
-                Message(role="system", content=self._system_prompt),
-                Message(role="user", content=user_msg),
-            ],
-            temperature=self._temperature,
+        messages = [
+            Message(role="system", content=self._system_prompt),
+            Message(role="user", content=user_msg),
+        ]
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries):
+            response = self._llm.complete(messages=messages, temperature=self._temperature)
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = "\n".join(cleaned.split("\n")[1:])
+                cleaned = cleaned.rsplit("```", 1)[0].strip()
+            try:
+                raw = json.loads(cleaned)
+                return [{"hypothesis": h["hypothesis"], "rationale": h["rationale"]} for h in raw]
+            except Exception as e:
+                last_error = e
+                messages.append(Message(role="assistant", content=response))
+                messages.append(Message(
+                    role="user",
+                    content=(
+                        f"Your response was not a valid JSON array. Error: {e}. "
+                        f"Respond with ONLY a JSON array, no markdown fences."
+                    ),
+                ))
+        raise ValueError(
+            f"Failed to get valid hypotheses after {self._max_retries} attempts. Last error: {last_error}"
         )
-        raw = json.loads(response)
-        return [{"hypothesis": h["hypothesis"], "rationale": h["rationale"]} for h in raw]
 
     def _build_user_message(
         self,

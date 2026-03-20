@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from src.llm.backend import LLMBackend, Message
 from src.models.task import ExperimentPlan, TaskSpec
-from src.models.results import RunEntry
+from src.models.results import ExperimentRun
 
 
 class RefinerAgent:
@@ -28,9 +28,9 @@ class RefinerAgent:
 
     def refine(
         self,
-        incumbent: RunEntry,
+        incumbent: ExperimentRun,
         task: TaskSpec,
-        prior_runs: List[RunEntry],
+        prior_runs: List[ExperimentRun],
     ) -> ExperimentPlan:
         user_msg = self._build_user_message(incumbent, task, prior_runs)
         messages = [
@@ -63,9 +63,9 @@ class RefinerAgent:
 
     def _build_user_message(
         self,
-        incumbent: RunEntry,
+        incumbent: ExperimentRun,
         task: TaskSpec,
-        prior_runs: List[RunEntry],
+        prior_runs: List[ExperimentRun],
     ) -> str:
         families = incumbent.plan.model_families if incumbent.plan else []
         overfitting_gap = incumbent.diagnostics.overfitting_gap

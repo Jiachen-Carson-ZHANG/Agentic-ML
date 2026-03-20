@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 from src.models.task import TaskSpec, ExperimentPlan, RunConfig
-from src.models.results import ModelEntry, RunResult, DataProfile, RunDiagnostics, RunEntry
+from src.models.results import ModelEntry, RunResult, DataProfile, RunDiagnostics, ExperimentRun
 from src.models.nodes import ExperimentNode, NodeStatus, NodeStage, SearchContext, CaseEntry
 
 

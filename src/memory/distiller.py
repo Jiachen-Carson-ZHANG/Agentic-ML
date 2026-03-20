@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List
 from src.llm.backend import LLMBackend, Message
 from src.models.task import TaskSpec, ExperimentPlan
-from src.models.results import DataProfile, RunEntry
+from src.models.results import DataProfile, ExperimentRun
 from src.models.nodes import (
     CaseEntry, TaskTraits, WhatWorked, WhatFailed, SessionTrajectory,
 )
@@ -23,7 +23,7 @@ class Distiller:
         self,
         task: TaskSpec,
         data_profile: DataProfile,
-        run_history: List[RunEntry],
+        run_history: List[ExperimentRun],
     ) -> CaseEntry:
         successful = [
             r for r in run_history
@@ -104,7 +104,7 @@ class Distiller:
         self,
         task: TaskSpec,
         profile: DataProfile,
-        runs: List[RunEntry],
+        runs: List[ExperimentRun],
         metrics: List[float],
     ) -> str:
         run_lines = []

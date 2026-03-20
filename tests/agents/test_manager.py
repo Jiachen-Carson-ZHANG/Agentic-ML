@@ -5,7 +5,7 @@ from src.orchestration.scheduler import Scheduler
 from src.orchestration.accept_reject import AcceptReject
 from src.models.nodes import ExperimentNode, NodeStage, NodeStatus, SearchContext
 from src.models.task import TaskSpec, ExperimentPlan
-from src.models.results import DataProfile, RunResult, RunEntry, RunDiagnostics, RunConfig
+from src.models.results import DataProfile, RunResult, ExperimentRun, RunDiagnostics, RunConfig
 from src.llm.backend import LLMBackend
 from datetime import datetime
 
@@ -30,7 +30,7 @@ def make_node(node_id="n1", parent_id=None, stage=NodeStage.WARMUP, metric=None)
         config = RunConfig(autogluon_kwargs={}, data_path="d", output_dir="o")
         result = RunResult(status="success", primary_metric=metric,
                           best_model_name="GBM", fit_time_seconds=10.0)
-        entry = RunEntry(run_id="r1", node_id=node_id,
+        entry = ExperimentRun(run_id="r1", node_id=node_id,
                         config=config, result=result,
                         diagnostics=RunDiagnostics(), timestamp=datetime.now())
         node = node.model_copy(update={"entry": entry})

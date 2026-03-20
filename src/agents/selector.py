@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from src.llm.backend import LLMBackend, Message
 from src.models.task import ExperimentPlan, TaskSpec
-from src.models.results import DataProfile, RunEntry
+from src.models.results import DataProfile, ExperimentRun
 
 
 class SelectorAgent:
@@ -31,7 +31,7 @@ class SelectorAgent:
         hypothesis: str,
         task: TaskSpec,
         data_profile: DataProfile,
-        prior_runs: List[RunEntry],
+        prior_runs: List[ExperimentRun],
     ) -> ExperimentPlan:
         user_message = self._build_user_message(hypothesis, task, data_profile, prior_runs)
         messages = [
@@ -64,7 +64,7 @@ class SelectorAgent:
         hypothesis: str,
         task: TaskSpec,
         data_profile: DataProfile,
-        prior_runs: List[RunEntry],
+        prior_runs: List[ExperimentRun],
     ) -> str:
         history_text = ""
         if prior_runs:

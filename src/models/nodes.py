@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field
 from src.models.task import TaskSpec, ExperimentPlan, RunConfig
-from src.models.results import RunEntry, DataProfile
+from src.models.results import ExperimentRun, DataProfile
 
 
 class NodeStage(str, Enum):
@@ -31,7 +31,7 @@ class ExperimentNode(BaseModel):
     status: NodeStatus = NodeStatus.PENDING
     plan: ExperimentPlan
     config: Optional[RunConfig] = None
-    entry: Optional[RunEntry] = None
+    entry: Optional[ExperimentRun] = None
     depth: int = 0
     debug_depth: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
@@ -99,12 +99,12 @@ class CaseEntry(BaseModel):
 class SearchContext(BaseModel):
     task: TaskSpec
     data_profile: DataProfile
-    history: List[RunEntry] = Field(default_factory=list)
-    incumbent: Optional[RunEntry] = None
+    history: List[ExperimentRun] = Field(default_factory=list)
+    incumbent: Optional[ExperimentRun] = None
     current_node: ExperimentNode
     tree_summary: Dict[str, Any] = Field(default_factory=dict)
     similar_cases: List[CaseEntry] = Field(default_factory=list)
-    failed_attempts: List[RunEntry] = Field(default_factory=list)
+    failed_attempts: List[ExperimentRun] = Field(default_factory=list)
     stage: str = "warmup"
     budget_remaining: int = 5
     budget_used: int = 0

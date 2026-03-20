@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 from src.models.task import TaskSpec, ExperimentPlan, RunConfig
-from src.models.results import DataProfile, RunEntry, RunResult, RunDiagnostics
+from src.models.results import DataProfile, ExperimentRun, RunResult, RunDiagnostics
 from src.models.nodes import ExperimentNode, NodeStage, NodeStatus, SearchContext, TaskTraits
 from src.llm.backend import LLMBackend
 from src.memory.run_store import RunStore
@@ -160,8 +160,8 @@ class ExperimentSession:
             nodes.append(node)
         return nodes
 
-    def execute_node(self, node: ExperimentNode, data_profile: DataProfile) -> RunEntry:
-        """Run AutoGluon for a node and return the RunEntry."""
+    def execute_node(self, node: ExperimentNode, data_profile: DataProfile) -> ExperimentRun:
+        """Run AutoGluon for a node and return the ExperimentRun."""
         self._run_counter += 1
         run_id = f"run_{self._run_counter:04d}"
         run_dir = str(self._session_dir / "runs" / run_id)
@@ -196,7 +196,7 @@ class ExperimentSession:
             failure_mode="execution_error" if result.status == "failed" else None,
         )
 
-        entry = RunEntry(
+        entry = ExperimentRun(
             run_id=run_id,
             node_id=node.node_id,
             config=config,
@@ -229,14 +229,14 @@ class ExperimentSession:
 
         return entry
 
-    def run(self, hypotheses: Optional[List[Dict[str, str]]] = None) -> Optional[RunEntry]:
+    def run(self, hypotheses: Optional[List[Dict[str, str]]] = None) -> Optional[ExperimentRun]:
         """
         Full session loop:
         1. Profile data
         2. Create candidate nodes from hypotheses
         3. Warm-up: run each candidate
         4. Optimize: refine the incumbent
-        5. Return best RunEntry
+        5. Return best ExperimentRun
         """
         self._log.info("=" * 60)
         self._log.info("Session: %s", self.task.task_name)
