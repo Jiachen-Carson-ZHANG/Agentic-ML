@@ -17,3 +17,8 @@ llm:
 session:
   case_store_path: "experiments/case_bank.jsonl"
   experiments_dir: "experiments"
+
+campaign:
+  max_sessions: 5
+  plateau_threshold: 0.002
+  plateau_window: 3
