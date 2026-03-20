@@ -57,6 +57,8 @@ def test_run_result_failed():
     )
     assert result.status == "failed"
     assert result.primary_metric is None
+    assert result.error == "AutoGluon crashed: OOM"
+    assert result.leaderboard == []
 
 
 def test_experiment_node_root():

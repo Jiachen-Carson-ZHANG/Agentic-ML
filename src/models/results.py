@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Literal, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 from src.models.task import RunConfig, ExperimentPlan
@@ -16,7 +16,7 @@ class ModelEntry(BaseModel):
 
 class RunResult(BaseModel):
     """What AutoGluon returned from a fit() call. No IDs — those live in ExperimentRun."""
-    status: str  # "success" | "failed"
+    status: Literal["success", "failed"]
     primary_metric: Optional[float] = None
     leaderboard: List[ModelEntry] = Field(default_factory=list)
     best_model_name: Optional[str] = None
