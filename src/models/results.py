@@ -15,16 +15,13 @@ class ModelEntry(BaseModel):
 
 
 class RunResult(BaseModel):
-    run_id: str
+    """What AutoGluon returned from a fit() call. No IDs — those live in ExperimentRun."""
     status: str  # "success" | "failed"
     primary_metric: Optional[float] = None
     leaderboard: List[ModelEntry] = Field(default_factory=list)
     best_model_name: Optional[str] = None
     fit_time_seconds: float = 0.0
-    artifacts_dir: str = ""
     error: Optional[str] = None
-    raw_info: Dict[str, Any] = Field(default_factory=dict)
-    diagnostics_overfitting_gap: Optional[float] = None
 
 
 class DataProfile(BaseModel):

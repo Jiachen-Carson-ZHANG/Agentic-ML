@@ -48,15 +48,12 @@ def test_run_config_has_node_id():
 
 def test_run_result_failed():
     result = RunResult(
-        run_id="run_0001",
         status="failed",
         primary_metric=None,
         leaderboard=[],
         best_model_name=None,
         fit_time_seconds=0.0,
-        artifacts_dir="experiments/test/runs/run_0001",
         error="AutoGluon crashed: OOM",
-        raw_info={}
     )
     assert result.status == "failed"
     assert result.primary_metric is None
