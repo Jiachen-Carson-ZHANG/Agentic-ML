@@ -25,9 +25,9 @@ def test_overfitting_gap_computed():
         val_scores=[0.87, 0.85],
         train_scores=[0.95, 0.93],
     )
-    result = ResultParser.from_predictor(predictor, "run_0001", 10.0, "/tmp", 0.87)
+    result, overfitting_gap = ResultParser.from_predictor(predictor, 10.0, 0.87)
     assert result.leaderboard[0].score_train == pytest.approx(0.95)
-    assert result.diagnostics_overfitting_gap == pytest.approx(0.95 - 0.87)
+    assert overfitting_gap == pytest.approx(0.95 - 0.87)
 
 
 def test_overfitting_gap_none_when_extra_info_fails():
@@ -46,7 +46,7 @@ def test_overfitting_gap_none_when_extra_info_fails():
             raise ValueError("extra_info not supported")
         return lb_basic
     p.leaderboard.side_effect = leaderboard_side_effect
-    result = ResultParser.from_predictor(p, "run_0001", 10.0, "/tmp", 0.87)
-    assert result.diagnostics_overfitting_gap is None
-    assert len(result.leaderboard) == 1          # basic leaderboard still works
-    assert result.leaderboard[0].score_train is None  # no train score in fallback
+    result, overfitting_gap = ResultParser.from_predictor(p, 10.0, 0.87)
+    assert overfitting_gap is None
+    assert len(result.leaderboard) == 1
+    assert result.leaderboard[0].score_train is None

@@ -69,22 +69,25 @@ def test_config_mapper_excludes_columns():
 # --- ResultParser tests ---
 
 def test_result_parser_success():
+    import pandas as pd
     mock_predictor = MagicMock()
     mock_predictor.eval_metric = "roc_auc"
-    mock_leaderboard = MagicMock()
-    mock_leaderboard.itertuples.return_value = [
-        MagicMock(model="GBM", score_val=0.87, fit_time=10.0, pred_time=0.1, stack_level=1),
-    ]
-    mock_predictor.leaderboard.return_value = mock_leaderboard
     mock_predictor.model_best = "GBM"
     mock_predictor.info.return_value = {"version": "1.0"}
 
-    result = ResultParser.from_predictor(
+    lb = pd.DataFrame({
+        "model": ["GBM"],
+        "score_val": [0.87],
+        "fit_time": [10.0],
+        "pred_time": [0.1],
+        "stack_level": [1],
+    })
+    mock_predictor.leaderboard.side_effect = lambda extra_info=False: lb
+
+    result, overfitting_gap = ResultParser.from_predictor(
         predictor=mock_predictor,
-        run_id="run_0001",
         fit_time=12.5,
-        artifacts_dir="experiments/test/runs/run_0001",
-        primary_metric_value=0.87
+        primary_metric_value=0.87,
     )
     assert result.status == "success"
     assert result.primary_metric == 0.87

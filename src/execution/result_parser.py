@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 import logging
-from typing import Any
+from typing import Any, Optional, Tuple
 from src.models.results import RunResult, ModelEntry
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,9 @@ class ResultParser:
     @staticmethod
     def from_predictor(
         predictor: Any,
-        run_id: str,
         fit_time: float,
-        artifacts_dir: str,
         primary_metric_value: float,
-    ) -> RunResult:
+    ) -> Tuple[RunResult, Optional[float]]:
         leaderboard_entries = []
         overfitting_gap = None
         try:
@@ -67,18 +65,14 @@ class ResultParser:
             except Exception:
                 pass
 
-        return RunResult(
-            run_id=run_id,
+        result = RunResult(
             status="success",
             primary_metric=primary_metric_value,
             leaderboard=leaderboard_entries,
             best_model_name=getattr(predictor, "model_best", None),
             fit_time_seconds=fit_time,
-            artifacts_dir=artifacts_dir,
-            error=None,
-            raw_info={},  # predictor.info() is megabytes of metadata; leaderboard covers what the agent needs
-            diagnostics_overfitting_gap=overfitting_gap,
         )
+        return result, overfitting_gap
 
     @staticmethod
     def from_error(error_msg: str) -> RunResult:

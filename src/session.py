@@ -190,7 +190,7 @@ class ExperimentSession:
             "config": config,
         }))
 
-        result = self._runner.run(config)
+        result, overfitting_gap = self._runner.run(config)
 
         diagnostics = RunDiagnostics(
             failure_mode="execution_error" if result.status == "failed" else None,
@@ -214,7 +214,7 @@ class ExperimentSession:
             if parent_metric is not None and result.primary_metric is not None:
                 metric_vs_parent = round(result.primary_metric - parent_metric, 4)
             entry.diagnostics = RunDiagnostics(
-                overfitting_gap=result.diagnostics_overfitting_gap,
+                overfitting_gap=overfitting_gap,
                 metric_vs_parent=metric_vs_parent,
             )
 

@@ -4,6 +4,7 @@ import os
 import time
 import contextlib
 import pandas as pd
+from typing import Optional, Tuple
 from src.models.task import RunConfig
 from src.models.results import RunResult
 from src.execution.result_parser import ResultParser
@@ -37,13 +38,13 @@ class AutoGluonRunner:
     def __init__(self, target_column: str) -> None:
         self.target_column = target_column
 
-    def run(self, config: RunConfig) -> RunResult:
+    def run(self, config: RunConfig) -> Tuple[RunResult, Optional[float]]:
         try:
             from autogluon.tabular import TabularPredictor
         except ImportError:
             return ResultParser.from_error(
                 "AutoGluon not installed. Run: pip install autogluon.tabular"
-            )
+            ), None
 
         os.makedirs(config.output_dir, exist_ok=True)
         df = pd.read_csv(config.data_path)
@@ -67,7 +68,7 @@ class AutoGluonRunner:
             with _log_to_file(log_path):
                 predictor.fit(df, **fit_kwargs)
         except Exception as e:
-            return ResultParser.from_error(str(e))
+            return ResultParser.from_error(str(e)), None
         fit_time = time.time() - start
 
         # Get validation score from leaderboard
