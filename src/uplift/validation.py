@@ -21,6 +21,8 @@ class UpliftDatasetValidationReport(BaseModel):
     scoring_is_unlabeled: bool = False
     treatment_counts: Dict[int, int] = Field(default_factory=dict)
     target_counts: Dict[int, int] = Field(default_factory=dict)
+    join_key_coverage: Dict[str, float] = Field(default_factory=dict)
+    null_rate_warnings: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
 
 class TreatmentControlBalanceDiagnostics(BaseModel):
@@ -28,6 +30,7 @@ class TreatmentControlBalanceDiagnostics(BaseModel):
 
     treatment_counts: Dict[int, int]
     target_rates_by_treatment: Dict[int, float]
+    average_treatment_effect: float = 0.0
     joint_counts: Dict[str, int]
     standardized_mean_differences: Dict[str, float] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
@@ -73,15 +76,47 @@ def _binary_counts(
     return {int(k): int(v) for k, v in series.value_counts().sort_index().items()}
 
 
+def _null_rate_warnings(
+    df: pd.DataFrame,
+    *,
+    table_name: str,
+    columns: List[str],
+    threshold: float,
+) -> Dict[str, float]:
+    rates: Dict[str, float] = {}
+    for col in columns:
+        if col not in df.columns:
+            continue
+        rate = float(df[col].isna().mean())
+        if rate > threshold:
+            rates[col] = round(rate, 6)
+    return rates
+
+
+def _join_key_coverage(
+    *,
+    left_ids: pd.Series,
+    right_ids: pd.Series,
+) -> float:
+    left = set(left_ids.dropna().astype(str).tolist())
+    if not left:
+        return 0.0
+    right = set(right_ids.dropna().astype(str).tolist())
+    return round(float(len(left.intersection(right))) / float(len(left)), 6)
+
+
 def validate_uplift_dataset(
     contract: UpliftProjectContract,
     *,
     purchases_sample_rows: int = 1000,
+    high_null_warning_threshold: float = 0.30,
 ) -> UpliftDatasetValidationReport:
     """Validate core RetailHero-style uplift table semantics."""
     errors: List[str] = []
     warnings: List[str] = []
     table_rows: Dict[str, int] = {}
+    join_key_coverage: Dict[str, float] = {}
+    null_rate_warnings: Dict[str, Dict[str, float]] = {}
 
     schema = contract.table_schema
 
@@ -121,6 +156,46 @@ def validate_uplift_dataset(
         errors,
     )
 
+    # Null-rate warnings (mirrors phase-1 ingestion notebook signal).
+    # These are warnings (not errors) because some columns are legitimately sparse
+    # in some dataset variants; we still want the pipeline to proceed deterministically.
+    null_rate_warnings["clients"] = _null_rate_warnings(
+        clients,
+        table_name="clients",
+        columns=[contract.entity_key, "age", "gender", "first_issue_date"],
+        threshold=high_null_warning_threshold,
+    )
+    null_rate_warnings["train"] = _null_rate_warnings(
+        train,
+        table_name="train",
+        columns=[contract.entity_key, contract.treatment_column, contract.target_column, "first_issue_date"],
+        threshold=high_null_warning_threshold,
+    )
+    null_rate_warnings["scoring"] = _null_rate_warnings(
+        scoring,
+        table_name="scoring",
+        columns=[contract.entity_key],
+        threshold=high_null_warning_threshold,
+    )
+    null_rate_warnings["purchases_sample"] = _null_rate_warnings(
+        purchases_sample,
+        table_name="purchases",
+        columns=[contract.entity_key, "transaction_datetime", "purchase_sum"],
+        threshold=high_null_warning_threshold,
+    )
+    if products is not None:
+        null_rate_warnings["products"] = _null_rate_warnings(
+            products,
+            table_name="products",
+            columns=["product_id"],
+            threshold=high_null_warning_threshold,
+        )
+    null_rate_warnings = {k: v for k, v in null_rate_warnings.items() if v}
+    if null_rate_warnings:
+        warnings.append(
+            f"high null rates detected (> {high_null_warning_threshold:.0%}) in: {sorted(null_rate_warnings)}"
+        )
+
     if contract.target_column in scoring.columns:
         errors.append("scoring table must not contain target column")
     if contract.treatment_column in scoring.columns:
@@ -147,6 +222,35 @@ def validate_uplift_dataset(
         if overlap:
             errors.append(f"train/scoring overlap detected: {len(overlap)} ids")
 
+    # Join-key coverage diagnostics (mirrors phase-1 ingestion notebook).
+    if contract.entity_key in clients.columns and contract.entity_key in train.columns:
+        join_key_coverage["train_in_clients"] = _join_key_coverage(
+            left_ids=train[contract.entity_key],
+            right_ids=clients[contract.entity_key],
+        )
+    if contract.entity_key in clients.columns and contract.entity_key in scoring.columns:
+        join_key_coverage["scoring_in_clients"] = _join_key_coverage(
+            left_ids=scoring[contract.entity_key],
+            right_ids=clients[contract.entity_key],
+        )
+    if contract.entity_key in clients.columns and contract.entity_key in purchases_sample.columns:
+        join_key_coverage["purchases_sample_in_clients"] = _join_key_coverage(
+            left_ids=purchases_sample[contract.entity_key],
+            right_ids=clients[contract.entity_key],
+        )
+
+    # Date parsing sanity (warning-level; features.py will still coerce deterministically).
+    if "transaction_datetime" in purchases_sample.columns:
+        parsed = pd.to_datetime(purchases_sample["transaction_datetime"], errors="coerce")
+        bad_rate = float(parsed.isna().mean())
+        if bad_rate > 0.0:
+            warnings.append(f"purchases_sample has unparseable transaction_datetime rows: {bad_rate:.2%}")
+    if "first_issue_date" in train.columns:
+        parsed = pd.to_datetime(train["first_issue_date"], errors="coerce")
+        bad_rate = float(parsed.isna().mean())
+        if bad_rate > 0.0:
+            warnings.append(f"train has unparseable first_issue_date rows: {bad_rate:.2%}")
+
     treatment_counts: Dict[int, int] = {}
     target_counts: Dict[int, int] = {}
     if contract.treatment_column in train.columns:
@@ -166,6 +270,8 @@ def validate_uplift_dataset(
         scoring_is_unlabeled=scoring_is_unlabeled,
         treatment_counts=treatment_counts,
         target_counts=target_counts,
+        join_key_coverage=join_key_coverage,
+        null_rate_warnings=null_rate_warnings,
     )
 
 
@@ -187,6 +293,7 @@ def compute_treatment_control_balance(
         int(k): float(v)
         for k, v in train_df.groupby(treatment_col)[target_col].mean().round(6).items()
     }
+    average_treatment_effect = round(float(target_rates.get(1, 0.0) - target_rates.get(0, 0.0)), 6)
     joint_series = (
         train_df[treatment_col].astype(str) + ":" + train_df[target_col].astype(str)
     )
@@ -216,6 +323,7 @@ def compute_treatment_control_balance(
     return TreatmentControlBalanceDiagnostics(
         treatment_counts=treatment_counts,
         target_rates_by_treatment=target_rates,
+        average_treatment_effect=average_treatment_effect,
         joint_counts=joint_counts,
         standardized_mean_differences=smds,
         warnings=warnings,

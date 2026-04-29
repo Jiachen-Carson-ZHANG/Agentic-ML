@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -21,6 +22,42 @@ class UpliftSplitFrames:
     test: pd.DataFrame
     strategy: str
     warnings: List[str] = field(default_factory=list)
+
+
+def write_split_artifacts(
+    split: UpliftSplitFrames,
+    *,
+    output_dir: str | Path,
+    prefix: str = "uplift_split",
+    file_format: str = "csv",
+) -> dict[str, str]:
+    """Persist split frames for reproducible inspection/debugging.
+
+    The main experiment loop keeps splits in-memory, but phase-1 notebooks wrote the
+    split frames to disk. This helper keeps that capability in the code pipeline
+    without requiring notebooks.
+    """
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    file_format = file_format.lower().strip()
+
+    def _write(df: pd.DataFrame, name: str) -> str:
+        path = output / f"{prefix}_{name}.{file_format}"
+        if file_format == "parquet":
+            # Parquet requires optional engines (pyarrow/fastparquet). Keep a clear
+            # error surface rather than silently falling back.
+            df.to_parquet(path, index=False)
+        elif file_format == "csv":
+            df.to_csv(path, index=False)
+        else:
+            raise ValueError(f"unsupported file_format: {file_format} (expected 'csv' or 'parquet')")
+        return str(path)
+
+    return {
+        "train": _write(split.train, "train"),
+        "validation": _write(split.validation, "validation"),
+        "test": _write(split.test, "test"),
+    }
 
 
 def _safe_stratify(values: pd.Series | None, n_rows: int) -> pd.Series | None:
