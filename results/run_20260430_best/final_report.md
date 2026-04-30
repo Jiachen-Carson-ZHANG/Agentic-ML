@@ -4,7 +4,7 @@ Task: retailhero-uplift
 
 ## Decision
 
-Use agent champion RUN-c5e6e86f; it beats the manual benchmark by 0.1439 stability-adjusted normalized Qini AUC.
+Use agent champion RUN-c5e6e86f as the AutoLift champion. Against the real human notebook benchmark (`human_baseline_uplift.ipynb`), this is a narrow held-out Qini win, not an across-the-board win: AutoLift held-out raw Qini is 331.7694 vs the human notebook best held-out row at 328.3899 (+3.3795). The human notebook best is stronger on held-out uplift AUC and top-k lift at 5%, 10%, and 20%.
 
 ## Agent Champion
 
@@ -18,7 +18,30 @@ Use agent champion RUN-c5e6e86f; it beats the manual benchmark by 0.1439 stabili
 - Held-out Uplift AUC: 0.06149
 - Policy gain: {'top_5pct_zero_cost': 211.258245, 'top_5pct_low_cost': 136.208245, 'top_5pct_medium_cost': -88.941755, 'top_10pct_zero_cost': 271.206372, 'top_10pct_low_cost': 121.156372, 'top_10pct_medium_cost': -328.993628, 'top_20pct_zero_cost': 386.336736, 'top_20pct_low_cost': 86.236736, 'top_20pct_medium_cost': -814.063264, 'top_30pct_zero_cost': 478.888396, 'top_30pct_low_cost': 28.788396, 'top_30pct_medium_cost': -1321.511604}
 
-## Manual Benchmark
+## Human Notebook Benchmark
+
+Source: `human_baseline_uplift.ipynb`
+
+Best held-out human notebook row: `class_transform_gbm` / `tuned_class_transform_gbm`
+
+- Held-out Qini AUC: 328.3899
+- Held-out Uplift AUC: 0.0631
+- Held-out Uplift@5%: 0.1637
+- Held-out Uplift@10%: 0.1289
+- Held-out Uplift@20%: 0.0764
+- Held-out Uplift@30%: 0.0627
+
+Notebook-selected validation champion: `tuned_solo_model_xgb`
+
+- Validation Qini AUC: 367.03263
+- Held-out Test Qini AUC: 299.13056
+- Held-out Test Uplift AUC: 0.05828
+- Held-out Test Uplift@10%: 0.12779
+- Held-out Test Uplift@30%: 0.05242
+
+For slide/report comparison, use the best held-out human notebook row above. The notebook-selected validation champion is listed for traceability, but it is not the strongest human held-out test result.
+
+## Internal AutoLift Reference
 
 - Run ID: RUN-447718f5
 - Template: two_model_sklearn
@@ -31,12 +54,25 @@ Use agent champion RUN-c5e6e86f; it beats the manual benchmark by 0.1439 stabili
 
 | Run | Role | Learner | Estimator | Val Normalized Qini | Val Uplift AUC | Held-out Normalized Qini | Held-out Uplift AUC |
 |---|---|---|---|---:|---:|---:|---:|
-| RUN-447718f5 | Manual | two_model | logistic_regression | 0.193438 | 0.044687 | 0.247670 | 0.046667 |
+| RUN-447718f5 | Internal reference | two_model | logistic_regression | 0.193438 | 0.044687 | 0.247670 | 0.046667 |
 | RUN-9c2b8311 | Agent | class_transformation | gradient_boosting | 0.260972 | 0.044990 | 0.186826 | 0.042445 |
 | RUN-bfd6fa1c | Agent | two_model | xgboost | 0.408278 | 0.064369 | 0.249374 | 0.058026 |
 | RUN-f7bdb1dc | Agent | class_transformation | xgboost | 0.377303 | 0.060407 | 0.313751 | 0.058876 |
 | RUN-dd10fc91 | Agent | two_model | lightgbm | 0.407684 | 0.065052 | 0.208495 | 0.056286 |
 | RUN-c5e6e86f | Agent | class_transformation | lightgbm | 0.344842 | 0.060678 | 0.337369 | 0.061490 |
+
+## Human vs AutoLift Comparison
+
+| Metric | AutoLift Champion | Human Notebook Best Held-out Row | Delta |
+|---|---:|---:|---:|
+| Held-out raw Qini AUC | 331.7694 | 328.3899 | +3.3795 |
+| Held-out uplift AUC | 0.06149 | 0.0631 | -0.00161 |
+| Held-out uplift@5% | 0.139969 | 0.1637 | -0.023731 |
+| Held-out uplift@10% | 0.099709 | 0.1289 | -0.029191 |
+| Held-out uplift@20% | 0.071709 | 0.0764 | -0.004691 |
+| Held-out uplift@30% | 0.062456 | 0.0627 | -0.000244 |
+
+Interpretation: AutoLift is the held-out Qini leader, but the real human notebook remains competitive and is stronger on several targeting lift metrics. Present the result as a marginal Qini improvement from automation, not as a broad dominance claim.
 
 ## Seed Stability
 
@@ -81,8 +117,8 @@ No repeated-seed stability groups are available yet.
 
 ## Why this answer is credible
 
-- Fixed reference benchmark is reported separately from agent champion selection.
-- Qini values in this report are normalized by the report-facing perfect-oracle Qini denominator.
+- Human notebook benchmark is reported separately from the internal AutoLift reference run.
+- AutoLift trial-table Qini values are normalized by the report-facing perfect-oracle Qini denominator; the human notebook comparison uses raw Qini because `human_baseline_uplift.ipynb` reports raw Qini.
 - Trial records come from the append-only uplift ledger.
 - Policy recommendations are derived from saved uplift_scores.csv artifacts.
 - XAI is used as supporting evidence for hypothesis explanation, not as the metric source of truth.
