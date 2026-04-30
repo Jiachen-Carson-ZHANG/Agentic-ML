@@ -47,6 +47,12 @@ UpliftWaveCreatedBy = Literal["manual", "llm"]
 
 UpliftWaveStatus = Literal["completed", "partially_completed", "blocked", "failed"]
 
+UpliftTemporalPolicy = Literal[
+    "pre_issue_only",
+    "post_issue_history",
+    "safe_history_until_reference",
+]
+
 UpliftStopReason = Literal[
     "validity_blocked",
     "compute_exhausted",
@@ -164,6 +170,8 @@ class UpliftFeatureRecipeSpec(BaseModel):
     feature_groups: List[str]
     windows_days: List[int] = Field(default_factory=list)
     interactions: List[str] = Field(default_factory=list)
+    temporal_policy: UpliftTemporalPolicy = "pre_issue_only"
+    semantic_name: Optional[str] = None
     builder_version: str = "v1"
     reference_date: Optional[str] = None
     artifact_path: Optional[str] = None
@@ -185,6 +193,8 @@ class UpliftFeatureRecipeSpec(BaseModel):
             "feature_groups": self.feature_groups,
             "windows_days": self.windows_days,
             "interactions": self.interactions,
+            "temporal_policy": self.temporal_policy,
+            "semantic_name": self.semantic_name,
             "builder_version": self.builder_version,
             "reference_date": self.reference_date,
         }
@@ -223,6 +233,8 @@ class UpliftFeatureArtifact(BaseModel):
     source_tables: List[str]
     feature_groups: List[str] = Field(default_factory=list)
     windows_days: List[int] = Field(default_factory=list)
+    temporal_policy: UpliftTemporalPolicy = "pre_issue_only"
+    semantic_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
     @model_validator(mode="after")
@@ -238,6 +250,57 @@ class UpliftFeatureArtifact(BaseModel):
         self.windows_days = sorted(dict.fromkeys(self.windows_days))
         if self.reference_date is not None:
             self.reference_date = datetime.fromisoformat(self.reference_date).isoformat()
+        return self
+
+
+def _normalize_temporal_policy_str(raw: str) -> str:
+    """Map any LLM temporal-policy string to a canonical Literal value.
+
+    Strips punctuation and separators before keyword matching so
+    every plausible LLM variant resolves to one of the three valid values.
+    """
+    slug = "".join(ch for ch in raw.lower() if ch.isalnum())
+    if slug in {"preissueonly", "preissue"}:
+        return "pre_issue_only"
+    if slug in {"postissuehistory", "postissue", "postissuepurchasehistory"}:
+        return "post_issue_history"
+    if any(k in slug for k in ("safe", "safehistory", "safereference", "hybrid")):
+        return "safe_history_until_reference"
+    # Return raw so Pydantic gives the user a clear error on truly unknown values
+    return raw
+
+
+class UpliftFeatureSemanticsDecision(BaseModel):
+    """LLM reasoning output for choosing an approved semantic feature recipe."""
+
+    feature_recipe: str
+    temporal_policy: UpliftTemporalPolicy
+    rationale: str
+    expected_signal: str
+    model_family_hints: List[str] = Field(default_factory=list)
+    leakage_controls: List[str] = Field(default_factory=list)
+    xai_sanity_checks: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_temporal_policy(cls, values: object) -> object:
+        if isinstance(values, dict) and "temporal_policy" in values:
+            values["temporal_policy"] = _normalize_temporal_policy_str(
+                str(values["temporal_policy"])
+            )
+        return values
+
+    @model_validator(mode="after")
+    def _validate_reasoning(self) -> "UpliftFeatureSemanticsDecision":
+        if not self.feature_recipe.strip():
+            raise ValueError("feature_recipe must not be empty")
+        if not self.rationale.strip():
+            raise ValueError("rationale must not be empty")
+        if not self.expected_signal.strip():
+            raise ValueError("expected_signal must not be empty")
+        self.model_family_hints = list(dict.fromkeys(self.model_family_hints))
+        self.leakage_controls = list(dict.fromkeys(self.leakage_controls))
+        self.xai_sanity_checks = list(dict.fromkeys(self.xai_sanity_checks))
         return self
 
 
@@ -672,9 +735,18 @@ class UpliftExperimentRecord(BaseModel):
     held_out_uplift_auc: Optional[float] = None
     held_out_uplift_at_k: Dict[str, Optional[float]] = Field(default_factory=dict)
     held_out_policy_gain: Dict[str, Optional[float]] = Field(default_factory=dict)
-    verdict: Literal["supported", "refuted", "inconclusive", "baseline"] = "baseline"
+    verdict: Literal["supported", "refuted", "inconclusive", "contradicted", "baseline"] = "baseline"
     next_recommended_actions: List[str] = Field(default_factory=list)
     artifact_paths: Dict[str, str] = Field(default_factory=dict)
+    # Agent reasoning — populated after evaluation phase
+    strategy_rationale: str = ""
+    feature_semantics_rationale: str = ""
+    feature_expected_signal: str = ""
+    temporal_policy: str = ""
+    xai_sanity_summary: str = ""
+    judge_narrative: str = ""
+    xai_summary: str = ""
+    policy_narrative: str = ""
 
 
 class UpliftSubmissionArtifact(BaseModel):

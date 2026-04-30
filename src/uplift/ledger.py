@@ -69,6 +69,54 @@ class UpliftLedger:
         )
         return self.append(record)
 
+    def patch_record(
+        self,
+        run_id: str,
+        *,
+        verdict: Optional[str] = None,
+        judge_narrative: Optional[str] = None,
+        xai_summary: Optional[str] = None,
+        policy_narrative: Optional[str] = None,
+        strategy_rationale: Optional[str] = None,
+        feature_semantics_rationale: Optional[str] = None,
+        feature_expected_signal: Optional[str] = None,
+        temporal_policy: Optional[str] = None,
+        xai_sanity_summary: Optional[str] = None,
+        next_recommended_actions: Optional[List[str]] = None,
+    ) -> None:
+        """Rewrite the JSONL in-place to update narrative fields on one record."""
+        records = self.load()
+        updated = False
+        for record in records:
+            if record.run_id == run_id:
+                if verdict is not None:
+                    record.verdict = verdict  # type: ignore[assignment]
+                if judge_narrative is not None:
+                    record.judge_narrative = judge_narrative
+                if xai_summary is not None:
+                    record.xai_summary = xai_summary
+                if policy_narrative is not None:
+                    record.policy_narrative = policy_narrative
+                if strategy_rationale is not None:
+                    record.strategy_rationale = strategy_rationale
+                if feature_semantics_rationale is not None:
+                    record.feature_semantics_rationale = feature_semantics_rationale
+                if feature_expected_signal is not None:
+                    record.feature_expected_signal = feature_expected_signal
+                if temporal_policy is not None:
+                    record.temporal_policy = temporal_policy
+                if xai_sanity_summary is not None:
+                    record.xai_sanity_summary = xai_sanity_summary
+                if next_recommended_actions is not None:
+                    record.next_recommended_actions = next_recommended_actions
+                updated = True
+                break
+        if not updated:
+            return
+        with self.path.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(record.model_dump_json() + "\n")
+
     def load(self) -> List[UpliftExperimentRecord]:
         """Load records from disk."""
         if not self.path.exists():

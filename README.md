@@ -122,7 +122,7 @@ The repo currently contains the deterministic uplift kernel and the first hypoth
 - `src/uplift/recipe_registry.py`: approved recipe-family registry that maps supervisor expansion requests to deterministic feature recipes and cached artifacts.
 - `src/uplift/splitting.py`: labeled train/validation/test splitting from `uplift_train.csv` only.
 - `src/uplift/metrics.py`: Qini curve/AUC, uplift curve/AUC, uplift@k, decile tables, and policy-gain helpers.
-- `src/uplift/templates.py`: registered learners: random, response model, two-model uplift, solo-model uplift, class transformation, sklearn logistic/gradient boosting, and optional XGBoost/LightGBM/CatBoost boosters.
+- `src/uplift/templates.py`: registered learners: random, response model, two-model uplift, solo-model uplift, class transformation, sklearn logistic/gradient boosting, XGBoost, LightGBM, and optional CatBoost boosters.
 - `src/uplift/loop.py`: deterministic trial runner that executes registered templates, writes cached model/prediction/uplift-score/curve/decile/result artifacts, and appends ledger records.
 - `src/uplift/ledger.py`: JSONL ledger for trial-level evidence.
 - `src/uplift/planning_agents.py`: PR2-style `ExperimentPlanningPhase` with case retrieval, hypothesis reasoning, strategy selection, and trial-spec writing.
@@ -154,7 +154,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-For the optional teammate booster templates and SHAP explanations:
+For optional CatBoost and SHAP explanations:
 
 ```bash
 pip install -e ".[dev,boosters,xai]"
@@ -216,6 +216,35 @@ python3 demos/uplift_run_baselines.py \
 ```
 
 Generated artifacts are intentionally ignored by Git.
+
+## Autonomous Notebook Demo
+
+For a presentation-friendly walkthrough of the full autonomous path, open:
+
+```text
+notebooks/bt5153_autonomous_pipeline_demo.ipynb
+```
+
+The notebook reads `RETAILHERO_DATA_DIR` from `.env`; the checked-in example points to the real local RetailHero data folder. It wraps the existing `AutoLiftOrchestrator` to show planning, model execution, judge/XAI/policy evaluation, retry decisions, the final markdown report, and a scoring submission preview. The tiny fixture dataset is only for tests and quick smoke checks.
+
+For hosted LLM experiments, copy `.env.example` to `.env` and set `LLM_PROVIDER` plus the matching key:
+
+```bash
+cp .env.example .env
+```
+
+Supported provider keys are `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `ANTHROPIC_API_KEY`. Local `ollama` does not need a real API key.
+
+For OpenAI runs, choose the model by node type rather than using one model everywhere:
+
+```dotenv
+LLM_PROVIDER=openai
+LLM_PLANNING_MODEL=o3
+LLM_EVALUATION_MODEL=o4-mini
+OPENAI_API_KEY=...
+```
+
+Planning nodes do hypothesis, strategy, and trial-spec reasoning, so `o3` is the stronger default when quality matters. `o4-mini` is a cheaper reasoning choice for evaluation, where deterministic metrics still bound the verdict. Use `LLM_MODEL` only as a fallback when you intentionally want one model for every LLM call. Autonomous model selection excludes response-model as a champion candidate, runs a minimal warmup of `two_model + gradient_boosting` and `class_transformation + gradient_boosting`, then asks the agent to choose the next executable model pair from ledger evidence instead of trying every combination blindly.
 
 ## Running On RetailHero Data
 

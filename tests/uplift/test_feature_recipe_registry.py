@@ -78,12 +78,26 @@ def test_registry_lists_stable_approved_recipe_families():
         "base",
         "diversity",
         "engagement",
+        "human_semantic_v1",
+        "hybrid_safe_semantic_v1",
         "product_category",
         "rfm",
+        "rfm_baseline",
         "windowed",
     ]
     assert registry.recipe_for_family("base").feature_recipe_id == registry.recipe_id_for_family("base")
     assert registry.recipe_for_family("product_category").feature_recipe_id == registry.recipe_id_for_family("product_category")
+
+
+def test_default_registry_exposes_human_semantic_recipe():
+    registry = UpliftFeatureRecipeRegistry.default()
+
+    recipe = registry.recipe_for_family("human_semantic_v1")
+
+    assert recipe.temporal_policy == "post_issue_history"
+    assert "account_lifecycle" in recipe.feature_groups
+    assert "redeem_behavior" in recipe.feature_groups
+    assert recipe.windows_days == [30, 60, 90]
 
 
 def test_registry_rejects_unknown_recipe_family():

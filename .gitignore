@@ -38,7 +38,7 @@ CLAUDE.md
 
 # External references and scratch material
 reference_repos/
-notebooks/
+notebooks/.ipynb_checkpoints/
 docs/
 docs /
 prompts/

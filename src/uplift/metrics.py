@@ -105,6 +105,63 @@ def qini_curve_data(
     )
 
 
+def _qini_count_curve_arrays(
+    y_true: Sequence[int] | np.ndarray,
+    treatment: Sequence[int] | np.ndarray,
+    uplift: Sequence[float] | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return count-space Qini curve arrays for normalized Qini ratios."""
+    y, t, u = _validate_uplift_inputs(y_true, treatment, uplift)
+    order = np.argsort(u, kind="mergesort")[::-1]
+    y = y[order]
+    t = t[order]
+    u = u[order]
+
+    y_control = y.copy()
+    y_control[t == 1] = 0
+    y_treatment = y.copy()
+    y_treatment[t == 0] = 0
+
+    distinct_value_indices = np.where(np.diff(u))[0]
+    threshold_indices = np.r_[distinct_value_indices, u.size - 1]
+    num_treatment = np.cumsum(t)[threshold_indices]
+    num_all = threshold_indices + 1
+    num_control = num_all - num_treatment
+    treatment_responders = np.cumsum(y_treatment)[threshold_indices]
+    control_responders = np.cumsum(y_control)[threshold_indices]
+    curve_values = treatment_responders - control_responders * np.divide(
+        num_treatment,
+        num_control,
+        out=np.zeros_like(num_treatment, dtype=float),
+        where=num_control != 0,
+    )
+
+    if num_all.size == 0 or curve_values[0] != 0 or num_all[0] != 0:
+        num_all = np.r_[0, num_all]
+        curve_values = np.r_[0, curve_values]
+    return num_all.astype(float), curve_values.astype(float)
+
+
+def _perfect_qini_count_curve_arrays(
+    y_true: Sequence[int] | np.ndarray,
+    treatment: Sequence[int] | np.ndarray,
+    *,
+    negative_effect: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    y, t, _ = _validate_uplift_inputs(y_true, treatment, np.zeros(len(y_true)))
+    if negative_effect:
+        oracle_uplift = y * t - y * (1 - t)
+        return _qini_count_curve_arrays(y, t, oracle_uplift)
+
+    treated = t == 1
+    control = ~treated
+    random_ratio = y[treated].sum() - treated.sum() * y[control].sum() / control.sum()
+    return (
+        np.array([0.0, float(random_ratio), float(len(y))]),
+        np.array([0.0, float(random_ratio), float(random_ratio)]),
+    )
+
+
 def uplift_curve_data(
     y_true: Sequence[int] | np.ndarray,
     treatment: Sequence[int] | np.ndarray,
@@ -140,6 +197,35 @@ def qini_auc_score(
     """Area under the cumulative Qini curve."""
     curve = qini_curve_data(y_true, treatment, uplift)
     return round(_trapz_compatible(curve["qini"], curve["fraction"]), 6)
+
+
+def normalized_qini_auc_score(
+    y_true: Sequence[int] | np.ndarray,
+    treatment: Sequence[int] | np.ndarray,
+    uplift: Sequence[float] | np.ndarray,
+    *,
+    negative_effect: bool = False,
+) -> float:
+    """Return normalized Qini as actual area above baseline divided by oracle area.
+
+    The default oracle excludes negative treatment effects, matching the
+    report-facing normalized Qini used by the BT5153 benchmark notes.
+    """
+    x_actual, y_actual = _qini_count_curve_arrays(y_true, treatment, uplift)
+    x_perfect, y_perfect = _perfect_qini_count_curve_arrays(
+        y_true,
+        treatment,
+        negative_effect=negative_effect,
+    )
+    x_baseline = pd.Series([0.0, float(x_perfect[-1])])
+    y_baseline = pd.Series([0.0, float(y_perfect[-1])])
+    baseline_area = _trapz_compatible(y_baseline, x_baseline)
+    perfect_area = _trapz_compatible(pd.Series(y_perfect), pd.Series(x_perfect))
+    actual_area = _trapz_compatible(pd.Series(y_actual), pd.Series(x_actual))
+    denominator = perfect_area - baseline_area
+    if denominator == 0:
+        return 0.0
+    return round(float((actual_area - baseline_area) / denominator), 6)
 
 
 def uplift_auc_score(

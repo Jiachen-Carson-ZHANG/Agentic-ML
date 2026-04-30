@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import json
 import pickle
 
 import pandas as pd
@@ -113,6 +114,10 @@ def test_run_uplift_trials_writes_ledger_and_metric_artifacts(tmp_path):
         assert Path(record.artifact_paths["predictions"]).exists()
         assert Path(record.artifact_paths["decile_table"]).exists()
         assert Path(record.artifact_paths["model"]).exists()
+        assert Path(record.artifact_paths["split_diagnostics"]).exists()
+        diagnostics = json.loads(Path(record.artifact_paths["split_diagnostics"]).read_text())
+        assert "partitions" in diagnostics
+        assert diagnostics["partitions"]["train"]["n_rows"] > 0
         with Path(record.artifact_paths["model"]).open("rb") as handle:
             cached_model = pickle.load(handle)
         assert cached_model.learner_family == record.uplift_learner_family

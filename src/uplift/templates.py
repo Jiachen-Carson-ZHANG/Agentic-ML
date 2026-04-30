@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -24,10 +24,17 @@ REGISTERED_UPLIFT_TEMPLATES: Dict[str, str] = {
     "response_model_gradient_boosting_sklearn": "response_model",
     "two_model_gradient_boosting_sklearn": "two_model",
     "solo_model_gradient_boosting_sklearn": "solo_model",
+    "two_model_random_forest_sklearn": "two_model",
+    "solo_model_random_forest_sklearn": "solo_model",
+    "class_transformation_random_forest_sklearn": "class_transformation",
     "class_transformation_sklearn": "class_transformation",
     "class_transformation_gradient_boosting_sklearn": "class_transformation",
     "two_model_xgboost": "two_model",
     "two_model_lightgbm": "two_model",
+    "solo_model_xgboost": "solo_model",
+    "solo_model_lightgbm": "solo_model",
+    "class_transformation_xgboost": "class_transformation",
+    "class_transformation_lightgbm": "class_transformation",
     "two_model_catboost": "two_model",
 }
 
@@ -38,10 +45,17 @@ REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS: Dict[str, str] = {
     "response_model_gradient_boosting_sklearn": "gradient_boosting",
     "two_model_gradient_boosting_sklearn": "gradient_boosting",
     "solo_model_gradient_boosting_sklearn": "gradient_boosting",
+    "two_model_random_forest_sklearn": "random_forest",
+    "solo_model_random_forest_sklearn": "random_forest",
+    "class_transformation_random_forest_sklearn": "random_forest",
     "class_transformation_sklearn": "logistic_regression",
     "class_transformation_gradient_boosting_sklearn": "gradient_boosting",
     "two_model_xgboost": "xgboost",
     "two_model_lightgbm": "lightgbm",
+    "solo_model_xgboost": "xgboost",
+    "solo_model_lightgbm": "lightgbm",
+    "class_transformation_xgboost": "xgboost",
+    "class_transformation_lightgbm": "lightgbm",
     "two_model_catboost": "catboost",
 }
 
@@ -100,6 +114,16 @@ class FittedUpliftModel:
             rng = np.random.RandomState(self.random_seed)
             return rng.random_sample(len(frame))
 
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            _warnings.filterwarnings(
+                "ignore",
+                message="X does not have valid feature names.*",
+                category=UserWarning,
+            )
+            return self._predict_uplift_inner(frame)
+
+    def _predict_uplift_inner(self, frame: pd.DataFrame) -> np.ndarray:
         features = self._features(frame)
         if self.learner_family == "response_model":
             return _positive_probability(self.model, features)
@@ -161,6 +185,27 @@ def _make_classifier(
                 ),
             ]
         )
+    if base_estimator == "random_forest":
+        return Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "classifier",
+                    RandomForestClassifier(
+                        **{
+                            "n_estimators": 200,
+                            "max_depth": 6,
+                            "min_samples_leaf": 50,   # tightened: probe showed leaf=20 still overfit
+                            "min_samples_split": 100,
+                            "max_features": "sqrt",
+                            "n_jobs": -1,
+                            **extra_params,
+                        },
+                        random_state=random_seed,
+                    ),
+                ),
+            ]
+        )
     if base_estimator == "logistic_regression":
         return Pipeline(
             steps=[
@@ -191,9 +236,12 @@ def _make_classifier(
                     "classifier",
                     XGBClassifier(
                         **{
-                            "n_estimators": 100,
-                            "max_depth": 5,
-                            "learning_rate": 0.1,
+                            "n_estimators": 300,
+                            "max_depth": 4,
+                            "learning_rate": 0.05,
+                            "subsample": 0.8,
+                            "colsample_bytree": 0.8,
+                            "min_child_weight": 10,
                             "eval_metric": "logloss",
                             **extra_params,
                         },
@@ -214,9 +262,12 @@ def _make_classifier(
                     "classifier",
                     LGBMClassifier(
                         **{
-                            "n_estimators": 100,
-                            "max_depth": 5,
-                            "learning_rate": 0.1,
+                            "n_estimators": 300,
+                            "num_leaves": 15,
+                            "min_data_in_leaf": 50,
+                            "learning_rate": 0.05,
+                            "subsample": 0.8,
+                            "colsample_bytree": 0.8,
                             "verbose": -1,
                             **extra_params,
                         },
@@ -291,6 +342,7 @@ def fit_uplift_model(
     base_estimator: Literal[
         "logistic_regression",
         "gradient_boosting",
+        "random_forest",
         "xgboost",
         "lightgbm",
         "catboost",

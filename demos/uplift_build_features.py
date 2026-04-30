@@ -63,6 +63,7 @@ def main() -> int:
         cohort=args.cohort,
         chunksize=args.chunksize,
         force=args.force,
+        progress_logger=print,
     )
 
     summary = {

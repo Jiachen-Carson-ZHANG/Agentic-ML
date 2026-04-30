@@ -6,6 +6,7 @@ import pytest
 
 from src.models.uplift import UpliftTrialSpec
 from src.uplift.templates import (
+    REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS,
     REGISTERED_UPLIFT_TEMPLATES,
     _make_classifier,
     fit_uplift_model,
@@ -37,12 +38,32 @@ def test_registered_uplift_templates_are_the_v1_baseline_ladder():
         "two_model_gradient_boosting_sklearn",
         "solo_model_gradient_boosting_sklearn",
         "response_model_gradient_boosting_sklearn",
+        "two_model_random_forest_sklearn",
+        "solo_model_random_forest_sklearn",
+        "class_transformation_random_forest_sklearn",
         "class_transformation_sklearn",
         "class_transformation_gradient_boosting_sklearn",
         "two_model_xgboost",
         "two_model_lightgbm",
+        "solo_model_xgboost",
+        "solo_model_lightgbm",
+        "class_transformation_xgboost",
+        "class_transformation_lightgbm",
         "two_model_catboost",
     }.issubset(set(REGISTERED_UPLIFT_TEMPLATES))
+
+
+def test_registered_templates_include_semantic_booster_families_when_available():
+    assert REGISTERED_UPLIFT_TEMPLATES["solo_model_xgboost"] == "solo_model"
+    assert REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS["solo_model_xgboost"] == "xgboost"
+    assert (
+        REGISTERED_UPLIFT_TEMPLATES["class_transformation_xgboost"]
+        == "class_transformation"
+    )
+    assert (
+        REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS["class_transformation_lightgbm"]
+        == "lightgbm"
+    )
 
 
 def test_run_uplift_template_returns_predictions_and_metrics_for_each_baseline():
@@ -58,12 +79,17 @@ def test_run_uplift_template_returns_predictions_and_metrics_for_each_baseline()
         ("two_model_gradient_boosting_sklearn", "two_model"),
         ("solo_model_gradient_boosting_sklearn", "solo_model"),
         ("response_model_gradient_boosting_sklearn", "response_model"),
+        ("two_model_random_forest_sklearn", "two_model"),
+        ("solo_model_random_forest_sklearn", "solo_model"),
+        ("class_transformation_random_forest_sklearn", "class_transformation"),
         ("class_transformation_sklearn", "class_transformation"),
         ("class_transformation_gradient_boosting_sklearn", "class_transformation"),
     ]:
         base_estimator = (
             "gradient_boosting"
             if "gradient_boosting" in template_name
+            else "random_forest"
+            if "random_forest" in template_name
             else "logistic_regression"
         )
         spec = UpliftTrialSpec(
@@ -131,6 +157,27 @@ def test_fit_uplift_model_supports_bounded_gradient_boosting_two_model():
     assert pd.Series(uplift).notna().all()
     assert "target" not in model.feature_columns
     assert "treatment_flg" not in model.feature_columns
+
+
+def test_fit_uplift_model_supports_random_forest_two_model():
+    frame = _labeled_feature_frame()
+    scoring = frame[["client_id", "feature_a", "feature_b"]].copy()
+
+    model = fit_uplift_model(
+        frame,
+        learner_family="two_model",
+        base_estimator="random_forest",
+        entity_key="client_id",
+        treatment_col="treatment_flg",
+        target_col="target",
+        random_seed=11,
+        params={"n_estimators": 10, "max_depth": 3, "min_samples_leaf": 1},
+    )
+    uplift = model.predict_uplift(scoring)
+
+    assert model.base_estimator == "random_forest"
+    assert len(uplift) == len(scoring)
+    assert pd.Series(uplift).notna().all()
 
 
 def test_fit_uplift_model_supports_class_transformation_family():

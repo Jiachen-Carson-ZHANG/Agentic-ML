@@ -6,6 +6,7 @@ from src.models.uplift import (
     UpliftEvaluationPolicy,
     UpliftFeatureArtifact,
     UpliftFeatureRecipeSpec,
+    UpliftFeatureSemanticsDecision,
     UpliftProjectContract,
     UpliftSplitContract,
     UpliftSubmissionArtifact,
@@ -106,6 +107,56 @@ def test_feature_recipe_id_includes_pinned_reference_date():
 
     assert recipe_a.reference_date == "2019-01-03T12:00:00"
     assert recipe_a.feature_recipe_id != recipe_b.feature_recipe_id
+
+
+def test_feature_recipe_hash_changes_when_temporal_policy_changes():
+    base = UpliftFeatureRecipeSpec(
+        source_tables=["clients", "purchases"],
+        feature_groups=["demographic", "rfm"],
+        windows_days=[30],
+        temporal_policy="pre_issue_only",
+    )
+    semantic = base.model_copy(update={"temporal_policy": "post_issue_history"})
+
+    assert base.feature_recipe_id != semantic.feature_recipe_id
+
+
+def test_feature_semantics_decision_requires_rationale_and_recipe():
+    decision = UpliftFeatureSemanticsDecision(
+        feature_recipe="human_semantic_v1",
+        temporal_policy="post_issue_history",
+        rationale="Behavioral history should explain uplift better than age alone.",
+        expected_signal="Purchase frequency and recency should enter top XAI features.",
+        model_family_hints=["class_transformation", "two_model", "two_model"],
+        leakage_controls=["no target/treatment columns", "respect feature cutoff"],
+        xai_sanity_checks=["age_clean should not be the only dominant feature"],
+    )
+
+    assert decision.feature_recipe == "human_semantic_v1"
+    assert decision.model_family_hints == ["class_transformation", "two_model"]
+
+
+@pytest.mark.parametrize(
+    ("raw_policy", "canonical_policy"),
+    [
+        ("safe_reference-date_history", "safe_history_until_reference"),
+        ("safe/reference date history", "safe_history_until_reference"),
+        ("post-issue purchase history", "post_issue_history"),
+        ("pre_issue-only", "pre_issue_only"),
+    ],
+)
+def test_feature_semantics_temporal_policy_normalizes_llm_variants(
+    raw_policy: str,
+    canonical_policy: str,
+):
+    decision = UpliftFeatureSemanticsDecision(
+        feature_recipe="human_semantic_v1",
+        temporal_policy=raw_policy,
+        rationale="Use semantic behavioral history with explicit leakage controls.",
+        expected_signal="Behavioral features should reduce age-only dominance.",
+    )
+
+    assert decision.temporal_policy == canonical_policy
 
 
 def test_feature_artifact_uses_declared_entity_key_not_literal_client_id():

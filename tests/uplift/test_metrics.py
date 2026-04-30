@@ -10,6 +10,7 @@ from src.models.uplift import UpliftEvaluationPolicy
 from src.uplift.metrics import (
     decile_table,
     evaluate_uplift_predictions,
+    normalized_qini_auc_score,
     policy_gain_by_cutoff,
     qini_auc_score,
     uplift_at_k,
@@ -61,6 +62,19 @@ def test_uplift_metrics_reward_better_ranking_than_reversed_ranking():
     assert uplift_auc_score(y_true, treatment, uplift_good) > uplift_auc_score(
         y_true, treatment, uplift_bad
     )
+    assert normalized_qini_auc_score(y_true, treatment, uplift_good) > (
+        normalized_qini_auc_score(y_true, treatment, uplift_bad)
+    )
+
+
+def test_normalized_qini_reports_ratio_not_raw_count_space():
+    y_true, treatment, uplift_good = _toy_arrays()
+
+    raw = qini_auc_score(y_true, treatment, uplift_good)
+    normalized = normalized_qini_auc_score(y_true, treatment, uplift_good)
+
+    assert abs(raw) > 1
+    assert -1 <= normalized <= 1
 
 
 def test_uplift_at_k_uses_top_ranked_treatment_control_difference():

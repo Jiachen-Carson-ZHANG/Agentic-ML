@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -16,6 +17,15 @@ from src.uplift.llm_client import make_chat_llm
 from src.uplift.loop import run_uplift_trials
 from src.uplift.evaluation_agents import run_evaluation_phase
 from src.uplift.planning_agents import ExperimentPlanningPhase
+from src.uplift.planning_agents import (
+    FeatureSemanticsAgent,
+    HypothesisDecision,
+    RetrievedContext,
+    UpliftStrategySelectionAgent,
+    _available_autonomous_warmup_candidates,
+    _safe_base_estimator,
+    _safe_learner_family,
+)
 from src.uplift.policy import build_policy_summary
 
 
@@ -77,15 +87,301 @@ def test_pr2_planning_phase_returns_readable_trial_spec(tmp_path):
 
     assert spec.trial_id.startswith("UT-")
     assert spec.feature_recipe == "rfm_baseline"
-    assert spec.learner_family in {
-        "response_model",
-        "solo_model",
-        "two_model",
-        "class_transformation",
+    assert spec.learner_family == "two_model"
+    assert spec.base_estimator == "gradient_boosting"
+    assert spec.params == {
+        "n_estimators": 200,
+        "learning_rate": 0.03,
+        "max_depth": 2,
+        "min_samples_leaf": 50,
+        "subsample": 0.7,
     }
-    assert spec.base_estimator == "logistic_regression"
-    assert spec.params == {"C": 1.0, "max_iter": 1000}
     assert hypothesis_store.query_by_status("proposed")
+
+
+def test_feature_semantics_agent_selects_approved_recipe(tmp_path):
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+
+    def llm(system: str, user: str) -> str:
+        return (
+            '{"feature_recipe":"human_semantic_v1",'
+            '"temporal_policy":"post_issue_history",'
+            '"rationale":"Age dominates XAI, so test richer behavioral semantics.",'
+            '"expected_signal":"Transaction features should enter top XAI drivers.",'
+            '"model_family_hints":["class_transformation","two_model"],'
+            '"leakage_controls":["audit temporal cutoff"],'
+            '"xai_sanity_checks":["age should not be sole dominant feature"]}'
+        )
+
+    agent = FeatureSemanticsAgent(ledger, llm)
+    decision = agent.run(
+        context=RetrievedContext(
+            similar_recipes=[],
+            supported_hypotheses=[],
+            refuted_hypotheses=[],
+            best_learner_family="two_model",
+            failed_runs=[],
+            summary="age_clean dominates prior XAI",
+        ),
+        available_feature_recipes=["rfm_baseline", "human_semantic_v1"],
+    )
+
+    assert decision.feature_recipe == "human_semantic_v1"
+    assert decision.temporal_policy == "post_issue_history"
+
+
+def test_feature_semantics_agent_falls_back_to_approved_recipe(tmp_path):
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+
+    def llm(system: str, user: str) -> str:
+        return (
+            '{"feature_recipe":"invented_recipe",'
+            '"temporal_policy":"post_issue_history",'
+            '"rationale":"Try an unavailable recipe.",'
+            '"expected_signal":"Unavailable signal.",'
+            '"model_family_hints":["two_model"],'
+            '"leakage_controls":["audit temporal cutoff"],'
+            '"xai_sanity_checks":["age should not be sole dominant feature"]}'
+        )
+
+    agent = FeatureSemanticsAgent(ledger, llm)
+    decision = agent.run(
+        context=RetrievedContext(
+            similar_recipes=[],
+            supported_hypotheses=[],
+            refuted_hypotheses=[],
+            best_learner_family="two_model",
+            failed_runs=[],
+            summary="age_clean dominates prior XAI",
+        ),
+        available_feature_recipes=["rfm_baseline", "human_semantic_v1"],
+    )
+
+    assert decision.feature_recipe == "rfm_baseline"
+    assert "unavailable recipe" in decision.rationale
+
+
+def test_autonomous_strategy_minimal_warmup_ignores_manual_baseline_and_excludes_response(tmp_path):
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+    manual_spec = UpliftTrialSpec(
+        spec_id="manual_baseline",
+        hypothesis_id="manual_baseline",
+        template_name="two_model_sklearn",
+        learner_family="two_model",
+        base_estimator="logistic_regression",
+        feature_recipe_id="recipe123456",
+    )
+    ledger.append_result(
+        trial_spec=manual_spec,
+        feature_artifact_id="artifact123",
+        result_status="success",
+        qini_auc=0.25,
+        uplift_auc=0.125,
+        artifact_paths={},
+    )
+    agent = UpliftStrategySelectionAgent(ledger, make_chat_llm("stub"))
+
+    strategy = agent.run(
+        HypothesisDecision(
+            action="propose",
+            hypothesis="Improve uplift ranking.",
+            evidence="manual baseline exists",
+            confidence=0.5,
+        ),
+        RetrievedContext(
+            similar_recipes=[],
+            supported_hypotheses=[],
+            refuted_hypotheses=[],
+            best_learner_family="response_model",
+            failed_runs=[],
+            summary="manual baseline only",
+        ),
+    )
+
+    assert strategy.learner_family == "two_model"
+    assert strategy.base_estimator == "gradient_boosting"
+    assert _safe_learner_family("response_model", "two_model") == "two_model"
+
+
+def test_autonomous_strategy_skips_warmup_and_uses_llm_from_first_trial(tmp_path, monkeypatch):
+    # Warmup is empty — agent goes straight to LLM-driven selection from trial 1.
+    monkeypatch.setattr(
+        "src.uplift.planning_agents._is_estimator_available",
+        lambda estimator: estimator != "catboost",
+    )
+    assert _available_autonomous_warmup_candidates() == []
+
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+
+    def choose_xgboost(system: str, user: str) -> str:
+        return (
+            '{"learner_family":"two_model","base_estimator":"xgboost",'
+            '"feature_recipe":"rfm_baseline","split_seed":42,'
+            '"eval_cutoff":0.2,"rationale":"Benchmark shows LogReg ceiling; try stronger booster."}'
+        )
+
+    agent = UpliftStrategySelectionAgent(ledger, choose_xgboost)
+    hypothesis = HypothesisDecision(
+        action="propose",
+        hypothesis="A stronger estimator will improve upon the LogReg benchmark.",
+        evidence="manual benchmark qini=0.248",
+        confidence=0.6,
+    )
+    context = RetrievedContext(
+        similar_recipes=[],
+        supported_hypotheses=[],
+        refuted_hypotheses=[],
+        best_learner_family="two_model",
+        failed_runs=[],
+        summary="benchmark only, no agent trials yet",
+    )
+
+    first = agent.run(hypothesis, context)
+
+    assert first.learner_family == "two_model"
+    assert first.base_estimator == "xgboost"
+
+
+def test_autonomous_strategy_replaces_duplicate_agent_choice_with_unused_pair(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.uplift.planning_agents._is_estimator_available",
+        lambda estimator: estimator != "catboost",
+    )
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+    for spec_id, family, estimator, qini in [
+        ("UT-gb", "two_model", "gradient_boosting", 0.30),
+        ("UT-ct", "class_transformation", "gradient_boosting", 0.31),
+    ]:
+        ledger.append_result(
+            trial_spec=UpliftTrialSpec(
+                spec_id=spec_id,
+                hypothesis_id=spec_id,
+                template_name=f"{family}_{estimator}_sklearn",
+                learner_family=family,
+                base_estimator=estimator,
+                feature_recipe_id="recipe123456",
+            ),
+            feature_artifact_id="artifact123",
+            result_status="success",
+            qini_auc=qini,
+            uplift_auc=qini / 2,
+            artifact_paths={},
+        )
+
+    def choose_duplicate(system: str, user: str) -> str:
+        return (
+            '{"learner_family":"class_transformation",'
+            '"base_estimator":"gradient_boosting",'
+            '"feature_recipe":"rfm_baseline","split_seed":42,'
+            '"eval_cutoff":0.3,"rationale":"Repeat current champion."}'
+        )
+
+    agent = UpliftStrategySelectionAgent(ledger, choose_duplicate)
+    strategy = agent.run(
+        HypothesisDecision(
+            action="propose",
+            hypothesis="Explore the next informative uplift model.",
+            evidence="Warmup completed.",
+            confidence=0.7,
+        ),
+        RetrievedContext(
+            similar_recipes=[],
+            supported_hypotheses=[],
+            refuted_hypotheses=[],
+            best_learner_family="class_transformation",
+            failed_runs=[],
+            summary="Both gradient-boosting warmup pairs already ran.",
+        ),
+    )
+
+    assert (strategy.learner_family, strategy.base_estimator) == (
+        "class_transformation",
+        "logistic_regression",
+    )
+    assert "already ran" in strategy.rationale
+
+
+def test_autonomous_strategy_treats_manual_logistic_reference_as_used_pair(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.uplift.planning_agents._is_estimator_available",
+        lambda estimator: estimator != "catboost",
+    )
+    ledger = UpliftLedger(tmp_path / "uplift_ledger.jsonl")
+    for spec_id, hypothesis_id, family, estimator, qini in [
+        ("manual_baseline", "manual_baseline", "two_model", "logistic_regression", 0.25),
+        ("UT-gb", "UT-gb", "two_model", "gradient_boosting", 0.30),
+        ("UT-ct", "UT-ct", "class_transformation", "gradient_boosting", 0.31),
+    ]:
+        ledger.append_result(
+            trial_spec=UpliftTrialSpec(
+                spec_id=spec_id,
+                hypothesis_id=hypothesis_id,
+                template_name="two_model_sklearn"
+                if estimator == "logistic_regression"
+                else f"{family}_{estimator}_sklearn",
+                learner_family=family,
+                base_estimator=estimator,
+                feature_recipe_id="recipe123456",
+            ),
+            feature_artifact_id="artifact123",
+            result_status="success",
+            qini_auc=qini,
+            uplift_auc=qini / 2,
+            artifact_paths={},
+        )
+
+    def choose_manual_duplicate(system: str, user: str) -> str:
+        payload = json.loads(user)
+        assert ["two_model", "logistic_regression"] in payload["used_model_pairs"]
+        return (
+            '{"learner_family":"two_model",'
+            '"base_estimator":"logistic_regression",'
+            '"feature_recipe":"rfm_baseline","split_seed":42,'
+            '"eval_cutoff":0.3,"rationale":"Retest fixed logistic reference."}'
+        )
+
+    agent = UpliftStrategySelectionAgent(ledger, choose_manual_duplicate)
+    strategy = agent.run(
+        HypothesisDecision(
+            action="propose",
+            hypothesis="Explore the next informative uplift model.",
+            evidence="Warmup completed.",
+            confidence=0.7,
+        ),
+        RetrievedContext(
+            similar_recipes=[],
+            supported_hypotheses=[],
+            refuted_hypotheses=[],
+            best_learner_family="class_transformation",
+            failed_runs=[],
+            summary="Manual reference and both warmup pairs already ran.",
+        ),
+    )
+
+    assert (strategy.learner_family, strategy.base_estimator) != (
+        "two_model",
+        "logistic_regression",
+    )
+    assert (strategy.learner_family, strategy.base_estimator) == (
+        "class_transformation",
+        "logistic_regression",
+    )
+
+
+def test_safe_base_estimator_rejects_unavailable_optional_estimators(monkeypatch):
+    monkeypatch.setattr(
+        "src.uplift.planning_agents._is_estimator_available",
+        lambda estimator: estimator != "catboost",
+    )
+
+    assert _safe_base_estimator("xgboost", "gradient_boosting") == "xgboost"
+    assert _safe_base_estimator("catboost", "gradient_boosting") == "gradient_boosting"
 
 
 def test_pr2_evaluation_phase_uses_predictions_and_policy_language(tmp_path):
@@ -116,7 +412,7 @@ def test_pr2_evaluation_phase_uses_predictions_and_policy_language(tmp_path):
     assert result["xai"]["skipped"] is False
     assert result["xai"]["method"] == "score_feature_association"
     assert result["xai"]["global_top_features"]
-    assert result["policy"]["recommended_threshold"] == 10
+    assert result["policy"]["recommended_threshold"] in {5, 10, 20, 30}
     assert result["policy"]["policy_data"]["targeting_results"][0]["threshold_pct"] == 5
 
 

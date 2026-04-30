@@ -10,10 +10,16 @@ import pandas as pd
 from src.models.uplift import UpliftExperimentRecord
 from src.uplift.ledger import UpliftLedger
 from src.uplift.llm_client import ChatLLM
-from src.uplift.metrics import qini_auc_score, uplift_at_k, uplift_auc_score
+from src.uplift.metrics import (
+    normalized_qini_auc_score,
+    qini_auc_score,
+    uplift_at_k,
+    uplift_auc_score,
+)
 from src.uplift.policy import build_policy_summary
 from src.uplift.xai import (
     check_leakage_signals,
+    diagnose_xai_feature_semantics,
     explain_cached_uplift_model,
     explain_score_feature_associations,
     run_shap_solo_model,
@@ -78,21 +84,54 @@ def _call_llm_strict(
 _VERDICT_RANK: dict[str, int] = {"contradicted": 0, "inconclusive": 1, "supported": 2}
 
 
-def _verdict_ceiling(metrics: dict, trial_status: str = "success") -> str:
+def _verdict_ceiling(
+    metrics: dict,
+    trial_status: str = "success",
+    prior_champion: "UpliftExperimentRecord | None" = None,
+) -> str:
     """Most permissive verdict deterministic evidence allows for the trial.
 
     Failed trials provide no evidence either way, so the ceiling is ``inconclusive``.
     Negative qini metrics cap the ceiling at ``contradicted``. A clearly positive
-    qini allows ``supported``; otherwise the ceiling is ``inconclusive``.
+    qini allows ``supported`` only if the trial did not regress on uplift_auc versus
+    the prior champion — a regression on either primary metric caps at ``inconclusive``.
     """
     if trial_status != "success":
         return "inconclusive"
-    qini = metrics.get("qini_auc")
+    qini = metrics.get("normalized_qini_auc", metrics.get("qini_auc"))
     if not isinstance(qini, (int, float)) or (isinstance(qini, float) and qini != qini):
         return "inconclusive"
     if qini <= -0.01:
         return "contradicted"
     if qini >= 0.05:
+        # Deterministic comparison: trial must also beat the prior champion on raw
+        # Qini — a positive absolute Qini alone is insufficient if the search has
+        # already found a better model. This prevents "supported" on a lateral move.
+        surface = metrics.get("evaluation_surface", "validation")
+        prior_qini = None
+        prior_uplift_auc = None
+        if prior_champion is not None:
+            prior_qini = (
+                prior_champion.held_out_qini_auc
+                if surface == "held_out" and prior_champion.held_out_qini_auc is not None
+                else prior_champion.qini_auc
+            )
+            prior_uplift_auc = (
+                prior_champion.held_out_uplift_auc
+                if surface == "held_out" and prior_champion.held_out_uplift_auc is not None
+                else prior_champion.uplift_auc
+            )
+        if prior_qini is not None:
+            raw_qini = metrics.get("qini_auc")
+            if raw_qini is not None and raw_qini <= prior_qini:
+                return "inconclusive"
+        if prior_uplift_auc is not None:
+            trial_uplift_auc = metrics.get("uplift_auc")
+            if (
+                trial_uplift_auc is not None
+                and trial_uplift_auc < prior_uplift_auc - 0.001
+            ):
+                return "inconclusive"
         return "supported"
     return "inconclusive"
 
@@ -117,6 +156,19 @@ def _scores_to_arrays(scores_df: pd.DataFrame):
     )
 
 
+def _score_metrics(scores_df: pd.DataFrame, *, surface: str) -> dict:
+    y_true, treatment, uplift = _scores_to_arrays(scores_df)
+    return {
+        "qini_auc": qini_auc_score(y_true, treatment, uplift),
+        "normalized_qini_auc": normalized_qini_auc_score(y_true, treatment, uplift),
+        "uplift_auc": uplift_auc_score(y_true, treatment, uplift),
+        "uplift_at_5pct": uplift_at_k(y_true, treatment, uplift, k=0.05),
+        "uplift_at_10pct": uplift_at_k(y_true, treatment, uplift, k=0.10),
+        "uplift_at_20pct": uplift_at_k(y_true, treatment, uplift, k=0.20),
+        "evaluation_surface": surface,
+    }
+
+
 class UpliftEvaluationJudge:
     """Decide whether the tested hypothesis is supported, refuted, or inconclusive."""
 
@@ -131,20 +183,22 @@ class UpliftEvaluationJudge:
         scores_df: pd.DataFrame,
         prior_champion: UpliftExperimentRecord | None = None,
         stability_score: float = 1.0,
+        held_out_scores_df: pd.DataFrame | None = None,
     ) -> dict:
-        y_true, treatment, uplift = _scores_to_arrays(scores_df)
-        metrics = {
-            "qini_auc": qini_auc_score(y_true, treatment, uplift),
-            "uplift_auc": uplift_auc_score(y_true, treatment, uplift),
-            "uplift_at_5pct": uplift_at_k(y_true, treatment, uplift, k=0.05),
-            "uplift_at_10pct": uplift_at_k(y_true, treatment, uplift, k=0.10),
-            "uplift_at_20pct": uplift_at_k(y_true, treatment, uplift, k=0.20),
-        }
+        validation_metrics = _score_metrics(scores_df, surface="validation")
+        held_out_metrics = (
+            _score_metrics(held_out_scores_df, surface="held_out")
+            if held_out_scores_df is not None and not held_out_scores_df.empty
+            else None
+        )
+        metrics = held_out_metrics or validation_metrics
         trial_status = trial_meta.get("trial_status", "success")
         champion_block = (
             {
                 "qini_auc": prior_champion.qini_auc,
+                "held_out_qini_auc": prior_champion.held_out_qini_auc,
                 "uplift_auc": prior_champion.uplift_auc,
+                "held_out_uplift_auc": prior_champion.held_out_uplift_auc,
                 "verdict": prior_champion.verdict,
             }
             if prior_champion is not None
@@ -158,6 +212,8 @@ class UpliftEvaluationJudge:
                     {
                         "trial_meta": trial_meta,
                         "computed_metrics": metrics,
+                        "validation_metrics": validation_metrics,
+                        "held_out_metrics": held_out_metrics,
                         "stability_score": stability_score,
                         "prior_champion": champion_block,
                     },
@@ -170,11 +226,13 @@ class UpliftEvaluationJudge:
             parsed = {}
         # Deterministic constraint: the LLM cannot promote a verdict beyond
         # what the trial's qini_auc supports. Failed trials force inconclusive.
-        ceiling = _verdict_ceiling(metrics, trial_status)
+        ceiling = _verdict_ceiling(metrics, trial_status, prior_champion)
         proposed = parsed.get("verdict", ceiling)
         parsed["verdict"] = _bound_verdict(proposed, ceiling, trial_status)
         parsed["deterministic_verdict_ceiling"] = ceiling
         parsed["computed_metrics"] = metrics
+        parsed["validation_metrics"] = validation_metrics
+        parsed["held_out_metrics"] = held_out_metrics
         parsed["trial_id"] = trial_meta.get("trial_id") or trial_meta.get("spec_id")
         return parsed
 
@@ -207,6 +265,11 @@ class UpliftXAIReasoner:
             cached_model_result["leakage_auto_flag"] = check_leakage_signals(
                 {"top_features": cached_model_result["global_top_features"]}
             )
+            cached_model_result["feature_semantics_diagnostic"] = (
+                diagnose_xai_feature_semantics(
+                    cached_model_result["global_top_features"]
+                )
+            )
             return cached_model_result
 
         shap_result = self._try_shap(
@@ -221,6 +284,9 @@ class UpliftXAIReasoner:
                 fallback["skipped"] = False
                 fallback["leakage_auto_flag"] = check_leakage_signals(
                     {"top_features": fallback["global_top_features"]}
+                )
+                fallback["feature_semantics_diagnostic"] = (
+                    diagnose_xai_feature_semantics(fallback["global_top_features"])
                 )
                 return fallback
             return {
@@ -251,6 +317,10 @@ class UpliftXAIReasoner:
             parsed = {}
         parsed["shap_raw"] = shap_result
         parsed["leakage_auto_flag"] = leakage
+        parsed["feature_semantics_diagnostic"] = diagnose_xai_feature_semantics(
+            shap_result.get("global_top_features", [])
+            or shap_result.get("top_features", [])
+        )
         parsed["trial_id"] = trial_id
         parsed["skipped"] = False
         return parsed
@@ -358,6 +428,7 @@ def run_evaluation_phase(
     revenue_per_conversion: float = 10.0,
     budget: float | None = None,
     trial_status: str = "success",
+    held_out_scores_df: pd.DataFrame | None = None,
 ) -> dict:
     """Run PR2 Judge, XAI, and Policy agents for one completed trial.
 
@@ -366,17 +437,45 @@ def run_evaluation_phase(
     receive an ``inconclusive`` verdict regardless of the LLM narrative.
     """
     trial_meta = {**trial_meta, "trial_status": trial_status}
+    current_trial_id = trial_meta.get("trial_id") or trial_meta.get("spec_id")
     records = ledger.load()
     champion = max(
-        (record for record in records if record.status == "success" and record.qini_auc is not None),
-        key=lambda record: record.qini_auc,
+        (
+            record
+            for record in records
+            if record.status == "success"
+            and (record.held_out_qini_auc is not None or record.qini_auc is not None)
+            and record.hypothesis_id != current_trial_id
+            and record.run_id != current_trial_id
+        ),
+        key=lambda record: (
+            record.held_out_qini_auc
+            if record.held_out_qini_auc is not None
+            else record.qini_auc
+        ),
         default=None,
     )
     judge = UpliftEvaluationJudge(llm)
     xai = UpliftXAIReasoner(llm)
     policy = UpliftPolicyAdvisor(llm)
 
-    judge_result = judge.run(trial_meta, scores_df, champion)
+    judgment_scores = (
+        held_out_scores_df
+        if held_out_scores_df is not None and not held_out_scores_df.empty
+        else scores_df
+    )
+    trial_meta = {
+        **trial_meta,
+        "evaluation_surface": "held_out"
+        if held_out_scores_df is not None and not held_out_scores_df.empty
+        else "validation",
+    }
+    judge_result = judge.run(
+        trial_meta,
+        scores_df,
+        champion,
+        held_out_scores_df=held_out_scores_df,
+    )
     xai_result = xai.run(
         trial_meta,
         features_df if features_df is not None else pd.DataFrame(),
@@ -386,7 +485,7 @@ def run_evaluation_phase(
     )
     policy_result = policy.run(
         trial_meta,
-        scores_df,
+        judgment_scores,
         xai_result,
         coupon_cost,
         revenue_per_conversion,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pickle
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
@@ -15,7 +16,7 @@ from src.models.uplift import (
     UpliftTrialSpec,
 )
 from src.uplift.ledger import UpliftLedger
-from src.uplift.splitting import split_labeled_uplift_frame
+from src.uplift.splitting import diagnose_uplift_split, split_labeled_uplift_frame
 from src.uplift.templates import FittedUpliftModel, run_uplift_template
 
 
@@ -52,6 +53,7 @@ def _write_trial_artifacts(
     qini_curve: pd.DataFrame,
     uplift_curve: pd.DataFrame,
     result_json: str,
+    split_diagnostics: dict,
     held_out_predictions: pd.DataFrame | None = None,
     held_out_decile_table: pd.DataFrame | None = None,
     held_out_qini_curve: pd.DataFrame | None = None,
@@ -66,6 +68,7 @@ def _write_trial_artifacts(
         "qini_curve": str(trial_dir / "qini_curve.csv"),
         "uplift_curve": str(trial_dir / "uplift_curve.csv"),
         "result_card": str(trial_dir / "result_card.json"),
+        "split_diagnostics": str(trial_dir / "split_diagnostics.json"),
     }
     predictions.to_csv(paths["predictions"], index=False)
     entity_key = predictions.columns[0]
@@ -75,6 +78,10 @@ def _write_trial_artifacts(
     qini_curve.to_csv(paths["qini_curve"], index=False)
     uplift_curve.to_csv(paths["uplift_curve"], index=False)
     Path(paths["result_card"]).write_text(result_json, encoding="utf-8")
+    Path(paths["split_diagnostics"]).write_text(
+        json.dumps(split_diagnostics, indent=2),
+        encoding="utf-8",
+    )
 
     if held_out_predictions is not None:
         paths["held_out_predictions"] = str(trial_dir / "held_out_predictions.csv")
@@ -120,6 +127,7 @@ def run_uplift_trials(
                 update={"split_contract": split_contract}
             )
             split = split_labeled_uplift_frame(labeled, trial_contract)
+            split_diagnostics = diagnose_uplift_split(split, trial_contract)
 
             # Validation drives champion selection. The test partition (when present)
             # is held out for an honest generalization estimate scored from the same
@@ -151,6 +159,7 @@ def run_uplift_trials(
                 qini_curve=template_output.qini_curve,
                 uplift_curve=template_output.uplift_curve,
                 result_json=template_output.result_card.model_dump_json(indent=2),
+                split_diagnostics=split_diagnostics,
                 held_out_predictions=template_output.held_out_predictions,
                 held_out_decile_table=template_output.held_out_decile_table,
                 held_out_qini_curve=template_output.held_out_qini_curve,

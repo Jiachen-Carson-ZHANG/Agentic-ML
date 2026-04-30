@@ -5,7 +5,7 @@ import hashlib
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional, Sequence
+from typing import Callable, Iterable, List, Literal, Optional, Sequence
 
 import pandas as pd
 
@@ -13,12 +13,19 @@ from src.models.uplift import (
     UpliftFeatureArtifact,
     UpliftFeatureRecipeSpec,
     UpliftProjectContract,
+    UpliftTemporalPolicy,
     _stable_hash,
 )
 
 
 FeatureCohort = Literal["train", "scoring", "all"]
 _SAMPLE_BYTES = 1_048_576
+ProgressLogger = Callable[[str], None]
+
+
+def _progress(progress_logger: ProgressLogger | None, message: str) -> None:
+    if progress_logger is not None:
+        progress_logger(f"[features] {message}")
 
 
 def _file_sample_hash(path: Path, sample_bytes: int = _SAMPLE_BYTES) -> str:
@@ -117,9 +124,12 @@ def _build_client_features(
     *,
     entity_key: str,
     expected_ids: Sequence[str],
+    feature_groups: Sequence[str],
+    reference_date: pd.Timestamp | None,
 ) -> pd.DataFrame:
     cohort_df = pd.DataFrame({entity_key: list(expected_ids)})
     client_df = cohort_df.merge(clients, on=entity_key, how="left")
+    groups = set(feature_groups)
 
     age = pd.to_numeric(client_df.get("age"), errors="coerce")
     valid_age = age.between(14, 100)
@@ -137,20 +147,61 @@ def _build_client_features(
         client_df[f"gender_{value}"] = (gender == value).astype(int)
     client_df["gender_other"] = (~gender.isin(["F", "M", "U"])).astype(int)
 
-    return client_df[
-        [
-            entity_key,
-            "age_clean",
-            "age_invalid_flag",
-            "issue_date_missing_flag",
-            "issue_year",
-            "issue_month",
-            "gender_F",
-            "gender_M",
-            "gender_U",
-            "gender_other",
-        ]
+    columns = [
+        entity_key,
+        "age_clean",
+        "age_invalid_flag",
+        "issue_date_missing_flag",
+        "issue_year",
+        "issue_month",
+        "gender_F",
+        "gender_M",
+        "gender_U",
+        "gender_other",
     ]
+
+    if "age_buckets" in groups:
+        client_df["age_le25"] = age.between(0, 25).fillna(False).astype(int)
+        client_df["age_26_35"] = age.between(26, 35).fillna(False).astype(int)
+        client_df["age_36_45"] = age.between(36, 45).fillna(False).astype(int)
+        client_df["age_46_55"] = age.between(46, 55).fillna(False).astype(int)
+        client_df["age_56_65"] = age.between(56, 65).fillna(False).astype(int)
+        client_df["age_gt65"] = (age > 65).fillna(False).astype(int)
+        columns.extend(
+            [
+                "age_le25",
+                "age_26_35",
+                "age_36_45",
+                "age_46_55",
+                "age_56_65",
+                "age_gt65",
+            ]
+        )
+
+    if "account_lifecycle" in groups:
+        ref = reference_date if reference_date is not None else issue_date.max()
+        if ref is None or pd.isna(ref):
+            account_age = pd.Series(0, index=client_df.index, dtype=float)
+        else:
+            account_age = (pd.Timestamp(ref) - issue_date).dt.days
+        client_df["account_age_days"] = (
+            pd.to_numeric(account_age, errors="coerce").clip(lower=0).fillna(0).astype(float)
+        )
+        columns.append("account_age_days")
+
+    if "redeem_behavior" in groups:
+        redeem_date = pd.to_datetime(client_df.get("first_redeem_date"), errors="coerce")
+        client_df["has_redeemed"] = redeem_date.notna().astype(int)
+        days_to_redeem = (redeem_date - issue_date).dt.days
+        client_df["days_to_first_redeem"] = (
+            pd.to_numeric(days_to_redeem, errors="coerce")
+            .clip(lower=0)
+            .fillna(-1)
+            .astype(float)
+        )
+        columns.extend(["has_redeemed", "days_to_first_redeem"])
+
+    return client_df[columns]
 
 
 def _issue_dates_by_customer(
@@ -175,15 +226,37 @@ def _filter_pre_issue_transactions(
     *,
     entity_key: str,
 ) -> pd.DataFrame:
+    return _filter_transactions_by_temporal_policy(
+        transactions,
+        issue_dates,
+        entity_key=entity_key,
+        temporal_policy="pre_issue_only",
+    )
+
+
+def _filter_transactions_by_temporal_policy(
+    transactions: pd.DataFrame,
+    issue_dates: pd.Series,
+    *,
+    entity_key: str,
+    temporal_policy: UpliftTemporalPolicy,
+) -> pd.DataFrame:
     if transactions.empty or issue_dates.empty:
         return transactions
     filtered = transactions.copy()
     filtered[entity_key] = filtered[entity_key].astype(str)
     filtered["__first_issue_date__"] = filtered[entity_key].map(issue_dates)
     tx_time = pd.to_datetime(filtered["transaction_datetime"], errors="coerce")
-    keep = filtered["__first_issue_date__"].isna() | (
-        tx_time < filtered["__first_issue_date__"]
-    )
+    if temporal_policy == "pre_issue_only":
+        keep = filtered["__first_issue_date__"].isna() | (
+            tx_time < filtered["__first_issue_date__"]
+        )
+    elif temporal_policy in {"post_issue_history", "safe_history_until_reference"}:
+        keep = filtered["__first_issue_date__"].isna() | (
+            tx_time >= filtered["__first_issue_date__"]
+        )
+    else:  # pragma: no cover - pydantic validates normal callers
+        raise ValueError(f"unsupported temporal_policy: {temporal_policy}")
     return filtered.loc[keep].drop(columns=["__first_issue_date__"])
 
 
@@ -193,6 +266,7 @@ def _read_purchase_transactions(
     entity_key: str,
     expected_ids: Sequence[str],
     chunksize: int,
+    progress_logger: ProgressLogger | None = None,
 ) -> pd.DataFrame:
     cohort_ids = set(expected_ids)
     usecols = [
@@ -207,10 +281,30 @@ def _read_purchase_transactions(
         "product_quantity",
     ]
     grouped_chunks: List[pd.DataFrame] = []
+    chunk_count = 0
+    raw_rows = 0
+    matched_rows = 0
 
-    for chunk in pd.read_csv(purchases_path, usecols=usecols, chunksize=chunksize):
+    _progress(
+        progress_logger,
+        "reading purchases "
+        f"customers={len(cohort_ids)} chunksize={chunksize} path={purchases_path}",
+    )
+
+    for chunk_index, chunk in enumerate(
+        pd.read_csv(purchases_path, usecols=usecols, chunksize=chunksize),
+        start=1,
+    ):
+        chunk_count = chunk_index
+        raw_rows += len(chunk)
         chunk[entity_key] = chunk[entity_key].astype(str)
-        chunk = chunk[chunk[entity_key].isin(cohort_ids)]
+        chunk = chunk[chunk[entity_key].isin(cohort_ids)].copy()
+        matched_rows += len(chunk)
+        _progress(
+            progress_logger,
+            "purchase chunk "
+            f"{chunk_index}: raw_rows_seen={raw_rows} matched_rows={matched_rows}",
+        )
         if chunk.empty:
             continue
 
@@ -248,10 +342,14 @@ def _read_purchase_transactions(
         grouped_chunks.append(grouped)
 
     if not grouped_chunks:
+        _progress(
+            progress_logger,
+            "purchase read complete: no matching transactions",
+        )
         return pd.DataFrame(columns=usecols)
 
     transactions = pd.concat(grouped_chunks, ignore_index=True)
-    return (
+    result = (
         transactions.groupby(
             [entity_key, "transaction_id", "transaction_datetime"],
             dropna=False,
@@ -268,6 +366,13 @@ def _read_purchase_transactions(
             }
         )
     )
+    _progress(
+        progress_logger,
+        "purchase read complete "
+        f"chunks={chunk_count} raw_rows={raw_rows} matched_rows={matched_rows} "
+        f"transactions={len(result)}",
+    )
+    return result
 
 
 def _read_product_purchase_lines(
@@ -276,6 +381,7 @@ def _read_product_purchase_lines(
     entity_key: str,
     expected_ids: Sequence[str],
     chunksize: int,
+    progress_logger: ProgressLogger | None = None,
 ) -> pd.DataFrame:
     cohort_ids = set(expected_ids)
     usecols = [
@@ -285,10 +391,30 @@ def _read_product_purchase_lines(
         "product_quantity",
     ]
     chunks: List[pd.DataFrame] = []
+    chunk_count = 0
+    raw_rows = 0
+    matched_rows = 0
 
-    for chunk in pd.read_csv(purchases_path, usecols=usecols, chunksize=chunksize):
+    _progress(
+        progress_logger,
+        "reading product purchase lines "
+        f"customers={len(cohort_ids)} chunksize={chunksize} path={purchases_path}",
+    )
+
+    for chunk_index, chunk in enumerate(
+        pd.read_csv(purchases_path, usecols=usecols, chunksize=chunksize),
+        start=1,
+    ):
+        chunk_count = chunk_index
+        raw_rows += len(chunk)
         chunk[entity_key] = chunk[entity_key].astype(str)
-        chunk = chunk[chunk[entity_key].isin(cohort_ids)]
+        chunk = chunk[chunk[entity_key].isin(cohort_ids)].copy()
+        matched_rows += len(chunk)
+        _progress(
+            progress_logger,
+            "product chunk "
+            f"{chunk_index}: raw_rows_seen={raw_rows} matched_rows={matched_rows}",
+        )
         if chunk.empty:
             continue
         chunk["transaction_datetime"] = pd.to_datetime(
@@ -302,8 +428,18 @@ def _read_product_purchase_lines(
         chunks.append(chunk)
 
     if not chunks:
+        _progress(
+            progress_logger,
+            "product purchase read complete: no matching rows",
+        )
         return pd.DataFrame(columns=usecols)
-    return pd.concat(chunks, ignore_index=True)
+    result = pd.concat(chunks, ignore_index=True)
+    _progress(
+        progress_logger,
+        "product purchase read complete "
+        f"chunks={chunk_count} raw_rows={raw_rows} matched_rows={matched_rows}",
+    )
+    return result
 
 
 def _aggregate_transactions(
@@ -405,19 +541,35 @@ def _build_purchase_features(
     expected_ids: Sequence[str],
     clients: pd.DataFrame,
     chunksize: int,
+    progress_logger: ProgressLogger | None = None,
+    prefiltered_transactions: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, Optional[str]]:
     entity_key = contract.entity_key
-    transactions = _read_purchase_transactions(
-        contract.table_schema.purchases_table,
-        entity_key=entity_key,
-        expected_ids=expected_ids,
-        chunksize=chunksize,
-    )
-    transactions = _filter_pre_issue_transactions(
-        transactions,
-        _issue_dates_by_customer(clients, entity_key=entity_key),
-        entity_key=entity_key,
-    )
+    if prefiltered_transactions is not None:
+        # Already filtered by the multi-recipe builder — skip read and filter.
+        transactions = prefiltered_transactions
+    else:
+        transactions = _read_purchase_transactions(
+            contract.table_schema.purchases_table,
+            entity_key=entity_key,
+            expected_ids=expected_ids,
+            chunksize=chunksize,
+            progress_logger=progress_logger,
+        )
+        _progress(
+            progress_logger,
+            f"filtering purchases temporal_policy={recipe.temporal_policy}",
+        )
+        transactions = _filter_transactions_by_temporal_policy(
+            transactions,
+            _issue_dates_by_customer(clients, entity_key=entity_key),
+            entity_key=entity_key,
+            temporal_policy=recipe.temporal_policy,
+        )
+        _progress(
+            progress_logger,
+            f"temporal purchase filter kept transactions={len(transactions)}",
+        )
 
     if recipe.reference_date is not None:
         reference_date = pd.Timestamp(datetime.fromisoformat(recipe.reference_date))
@@ -429,13 +581,19 @@ def _build_purchase_features(
         )
     if pd.isna(reference_date):
         reference_date = None
+    _progress(progress_logger, f"purchase reference_date={reference_date}")
 
     if reference_date is not None and not transactions.empty:
         transactions = transactions[
             pd.to_datetime(transactions["transaction_datetime"], errors="coerce")
             <= reference_date
         ]
+        _progress(
+            progress_logger,
+            f"reference-date purchase filter kept transactions={len(transactions)}",
+        )
 
+    _progress(progress_logger, "aggregating lifetime purchase features")
     feature_df = _aggregate_transactions(
         transactions,
         entity_key=entity_key,
@@ -446,6 +604,7 @@ def _build_purchase_features(
 
     if reference_date is None:
         for window in recipe.windows_days:
+            _progress(progress_logger, f"aggregating {window}d purchase features")
             window_features = _aggregate_transactions(
                 pd.DataFrame(columns=transactions.columns),
                 entity_key=entity_key,
@@ -458,6 +617,7 @@ def _build_purchase_features(
         return feature_df, reference_date_str
 
     for window in recipe.windows_days:
+        _progress(progress_logger, f"aggregating {window}d purchase features")
         cutoff = reference_date - pd.Timedelta(days=window)
         window_transactions = transactions[
             pd.to_datetime(transactions["transaction_datetime"], errors="coerce") >= cutoff
@@ -518,6 +678,7 @@ def _build_product_features(
     clients: pd.DataFrame,
     chunksize: int,
     reference_date: Optional[str],
+    progress_logger: ProgressLogger | None = None,
 ) -> tuple[pd.DataFrame, Optional[str]]:
     products_path = contract.table_schema.products_table
     if not products_path:
@@ -529,11 +690,17 @@ def _build_product_features(
         entity_key=contract.entity_key,
         expected_ids=expected_ids,
         chunksize=chunksize,
+        progress_logger=progress_logger,
     )
-    lines = _filter_pre_issue_transactions(
+    lines = _filter_transactions_by_temporal_policy(
         lines,
         _issue_dates_by_customer(clients, entity_key=contract.entity_key),
         entity_key=contract.entity_key,
+        temporal_policy=recipe.temporal_policy,
+    )
+    _progress(
+        progress_logger,
+        f"temporal product filter kept rows={len(lines)}",
     )
     if reference_date is not None:
         ref = pd.Timestamp(datetime.fromisoformat(reference_date))
@@ -644,6 +811,169 @@ def _build_product_features(
     return result, reference_date_str
 
 
+def build_feature_tables_multi_recipe(
+    contract: UpliftProjectContract,
+    *,
+    recipes: Sequence[UpliftFeatureRecipeSpec],
+    output_dir: str | Path,
+    cohort: FeatureCohort = "train",
+    chunksize: int = 100_000,
+    force: bool = False,
+    progress_logger: ProgressLogger | None = None,
+) -> list[UpliftFeatureArtifact]:
+    """Build feature artifacts for multiple recipes in a single purchase-file pass.
+
+    Reads the purchase CSV once, caches all transactions in memory, then applies
+    each recipe's temporal filter on the cached DataFrame. This cuts Stage-3 I/O
+    from N_recipes × 1 full scan to exactly 1 full scan regardless of recipe count.
+    Already-cached artifacts are skipped without re-reading the file.
+    """
+    output = Path(output_dir)
+    dataset_fingerprint = compute_dataset_fingerprint(contract)
+
+    # Determine which recipes actually need building.
+    pending: list[UpliftFeatureRecipeSpec] = []
+    results: dict[str, UpliftFeatureArtifact] = {}
+    for recipe in recipes:
+        feature_artifact_id = recipe.compute_feature_artifact_id(dataset_fingerprint)
+        artifact_path = output / f"uplift_features_{cohort}_{feature_artifact_id}.csv"
+        metadata_path = output / f"uplift_features_{cohort}_{feature_artifact_id}.metadata.json"
+        if not force and artifact_path.exists() and metadata_path.exists():
+            _progress(progress_logger, f"cache hit cohort={cohort} artifact={artifact_path}")
+            results[recipe.feature_recipe_id] = UpliftFeatureArtifact.model_validate_json(
+                metadata_path.read_text()
+            )
+        else:
+            pending.append(recipe)
+
+    if not pending:
+        return [results[r.feature_recipe_id] for r in recipes]
+
+    # One purchase-file scan shared across all pending recipes.
+    expected_ids = _cohort_ids(contract, cohort)
+    clients = pd.read_csv(contract.table_schema.clients_table)
+    clients[contract.entity_key] = clients[contract.entity_key].astype(str)
+    issue_dates = _issue_dates_by_customer(clients, entity_key=contract.entity_key)
+
+    all_transactions = _read_purchase_transactions(
+        contract.table_schema.purchases_table,
+        entity_key=contract.entity_key,
+        expected_ids=expected_ids,
+        chunksize=chunksize,
+        progress_logger=progress_logger,
+    )
+
+    for recipe in pending:
+        _progress(progress_logger, f"filtering purchases temporal_policy={recipe.temporal_policy}")
+        transactions = _filter_transactions_by_temporal_policy(
+            all_transactions,
+            issue_dates,
+            entity_key=contract.entity_key,
+            temporal_policy=recipe.temporal_policy,
+        )
+        _progress(progress_logger, f"temporal purchase filter kept transactions={len(transactions)}")
+        artifact = _build_feature_table_from_transactions(
+            contract,
+            recipe=recipe,
+            transactions=transactions,
+            clients=clients,
+            expected_ids=expected_ids,
+            output_dir=output_dir,
+            cohort=cohort,
+            dataset_fingerprint=dataset_fingerprint,
+            progress_logger=progress_logger,
+        )
+        results[recipe.feature_recipe_id] = artifact
+
+    return [results[r.feature_recipe_id] for r in recipes]
+
+
+def _build_feature_table_from_transactions(
+    contract: UpliftProjectContract,
+    *,
+    recipe: UpliftFeatureRecipeSpec,
+    transactions: pd.DataFrame,
+    clients: pd.DataFrame,
+    expected_ids: Sequence[str],
+    output_dir: str | Path,
+    cohort: FeatureCohort,
+    dataset_fingerprint: str,
+    progress_logger: ProgressLogger | None = None,
+) -> UpliftFeatureArtifact:
+    """Build one artifact from pre-filtered transactions — skips the purchase-file read."""
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    feature_artifact_id = recipe.compute_feature_artifact_id(dataset_fingerprint)
+    artifact_path = output / f"uplift_features_{cohort}_{feature_artifact_id}.csv"
+    metadata_path = output / f"uplift_features_{cohort}_{feature_artifact_id}.metadata.json"
+
+    _progress(progress_logger, f"build start cohort={cohort} artifact={artifact_path}")
+    reference_date: Optional[str] = recipe.reference_date
+    reference_timestamp = (
+        pd.Timestamp(datetime.fromisoformat(reference_date)) if reference_date else None
+    )
+
+    _progress(progress_logger, "building client demographic features")
+    feature_df = _build_client_features(
+        clients,
+        entity_key=contract.entity_key,
+        expected_ids=expected_ids,
+        feature_groups=recipe.feature_groups,
+        reference_date=reference_timestamp,
+    )
+
+    purchase_groups = {"rfm", "basket", "points"}
+    if purchase_groups.intersection(recipe.feature_groups):
+        active_groups = sorted(purchase_groups.intersection(recipe.feature_groups))
+        _progress(progress_logger, f"building purchase feature groups={active_groups}")
+        purchase_df, reference_date = _build_purchase_features(
+            contract,
+            recipe=recipe,
+            expected_ids=expected_ids,
+            clients=clients,
+            chunksize=0,  # unused when prefiltered_transactions is provided
+            progress_logger=progress_logger,
+            prefiltered_transactions=transactions,
+        )
+        feature_df = feature_df.merge(purchase_df, on=contract.entity_key, how="left")
+        _progress(progress_logger, f"merged purchase features shape={feature_df.shape}")
+
+    _progress(progress_logger, f"validating feature table shape={feature_df.shape}")
+    validate_feature_table(
+        feature_df,
+        entity_key=contract.entity_key,
+        forbidden_columns=[contract.target_column, contract.treatment_column],
+        expected_ids=expected_ids,
+    )
+
+    _progress(progress_logger, f"writing feature artifact path={artifact_path}")
+    feature_df.to_csv(artifact_path, index=False)
+    columns = [str(c) for c in feature_df.columns]
+    generated_columns = [c for c in columns if c != contract.entity_key]
+    artifact = UpliftFeatureArtifact(
+        feature_recipe_id=recipe.feature_recipe_id,
+        feature_artifact_id=feature_artifact_id,
+        dataset_fingerprint=dataset_fingerprint,
+        builder_version=recipe.builder_version,
+        artifact_path=str(artifact_path),
+        metadata_path=str(metadata_path),
+        cohort=cohort,
+        entity_key=contract.entity_key,
+        reference_date=reference_date,
+        row_count=len(feature_df),
+        columns=columns,
+        generated_columns=generated_columns,
+        source_tables=recipe.source_tables,
+        feature_groups=recipe.feature_groups,
+        windows_days=recipe.windows_days,
+        temporal_policy=recipe.temporal_policy,
+        semantic_name=recipe.semantic_name,
+    )
+    metadata_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+    _progress(progress_logger, f"wrote feature artifact rows={artifact.row_count} columns={len(columns)}")
+    return artifact
+
+
 def build_feature_table(
     contract: UpliftProjectContract,
     *,
@@ -652,6 +982,7 @@ def build_feature_table(
     cohort: FeatureCohort = "train",
     chunksize: int = 100_000,
     force: bool = False,
+    progress_logger: ProgressLogger | None = None,
 ) -> UpliftFeatureArtifact:
     """Build or load a cached customer-level feature table artifact."""
     output = Path(output_dir)
@@ -663,32 +994,60 @@ def build_feature_table(
     metadata_path = output / f"uplift_features_{cohort}_{feature_artifact_id}.metadata.json"
 
     if not force and artifact_path.exists() and metadata_path.exists():
+        _progress(
+            progress_logger,
+            f"cache hit cohort={cohort} artifact={artifact_path}",
+        )
         return UpliftFeatureArtifact.model_validate_json(metadata_path.read_text())
 
+    _progress(
+        progress_logger,
+        f"build start cohort={cohort} artifact={artifact_path}",
+    )
     expected_ids = _cohort_ids(contract, cohort)
+    _progress(progress_logger, f"cohort={cohort} customer_ids={len(expected_ids)}")
+    _progress(progress_logger, f"loading clients table path={contract.table_schema.clients_table}")
     clients = pd.read_csv(contract.table_schema.clients_table)
     clients[contract.entity_key] = clients[contract.entity_key].astype(str)
 
+    reference_date: Optional[str] = recipe.reference_date
+    reference_timestamp = (
+        pd.Timestamp(datetime.fromisoformat(reference_date))
+        if reference_date is not None
+        else None
+    )
+
+    _progress(progress_logger, "building client demographic features")
     feature_df = _build_client_features(
         clients,
         entity_key=contract.entity_key,
         expected_ids=expected_ids,
+        feature_groups=recipe.feature_groups,
+        reference_date=reference_timestamp,
     )
-    reference_date: Optional[str] = recipe.reference_date
 
     purchase_groups = {"rfm", "basket", "points"}
     if purchase_groups.intersection(recipe.feature_groups):
+        active_groups = sorted(purchase_groups.intersection(recipe.feature_groups))
+        _progress(progress_logger, f"building purchase feature groups={active_groups}")
         purchase_df, reference_date = _build_purchase_features(
             contract,
             recipe=recipe,
             expected_ids=expected_ids,
             clients=clients,
             chunksize=chunksize,
+            progress_logger=progress_logger,
         )
         feature_df = feature_df.merge(purchase_df, on=contract.entity_key, how="left")
+        _progress(
+            progress_logger,
+            f"merged purchase features shape={feature_df.shape}",
+        )
 
     product_groups = {"product_category", "diversity"}
     if product_groups.intersection(recipe.feature_groups):
+        active_groups = sorted(product_groups.intersection(recipe.feature_groups))
+        _progress(progress_logger, f"building product feature groups={active_groups}")
         product_df, reference_date = _build_product_features(
             contract,
             recipe=recipe,
@@ -696,9 +1055,15 @@ def build_feature_table(
             clients=clients,
             chunksize=chunksize,
             reference_date=reference_date,
+            progress_logger=progress_logger,
         )
         feature_df = feature_df.merge(product_df, on=contract.entity_key, how="left")
+        _progress(
+            progress_logger,
+            f"merged product features shape={feature_df.shape}",
+        )
 
+    _progress(progress_logger, f"validating feature table shape={feature_df.shape}")
     validate_feature_table(
         feature_df,
         entity_key=contract.entity_key,
@@ -706,6 +1071,7 @@ def build_feature_table(
         expected_ids=expected_ids,
     )
 
+    _progress(progress_logger, f"writing feature artifact path={artifact_path}")
     feature_df.to_csv(artifact_path, index=False)
     columns = [str(column) for column in feature_df.columns]
     generated_columns = [column for column in columns if column != contract.entity_key]
@@ -726,6 +1092,12 @@ def build_feature_table(
         source_tables=recipe.source_tables,
         feature_groups=recipe.feature_groups,
         windows_days=recipe.windows_days,
+        temporal_policy=recipe.temporal_policy,
+        semantic_name=recipe.semantic_name,
     )
     metadata_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+    _progress(
+        progress_logger,
+        f"wrote feature artifact rows={artifact.row_count} columns={len(columns)}",
+    )
     return artifact

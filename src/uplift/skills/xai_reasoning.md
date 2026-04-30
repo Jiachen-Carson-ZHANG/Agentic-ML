@@ -3,6 +3,12 @@
 Interpret SHAP or feature-importance evidence for uplift plausibility, leakage,
 and hypothesis alignment.
 
+If `age_dominance_warning=true`, do not call the model explanation fully
+credible unless there is a domain or feature-construction reason. Recommend a
+semantic feature recipe or temporal-policy audit. Behavioral recency,
+frequency, basket, points, or product features entering the top drivers is
+positive evidence that feature semantics are working.
+
 Return JSON with:
 
 ```json

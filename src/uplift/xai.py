@@ -2,10 +2,36 @@
 from __future__ import annotations
 
 import pickle
+import warnings
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+
+
+def diagnose_xai_feature_semantics(
+    top_features: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Flag suspicious explanation patterns for semantic feature recipes."""
+    names = [str(item.get("feature", "")) for item in top_features]
+    behavioral_prefixes = (
+        "purchase_",
+        "txn_",
+        "recency_",
+        "basket_",
+        "points_",
+        "avg_transaction_",
+        "product_",
+    )
+    has_behavioral = any(name.startswith(behavioral_prefixes) for name in names[:5])
+    age_first = bool(names) and names[0] == "age_clean"
+    return {
+        "age_dominance_warning": age_first,
+        "top_feature_is_age": age_first,
+        "behavioral_top5_present": has_behavioral,
+        "top_feature": names[0] if names else None,
+    }
 
 
 def explain_score_feature_associations(
@@ -59,7 +85,7 @@ def explain_score_feature_associations(
         values = pd.to_numeric(merged[column], errors="coerce")
         if values.notna().sum() < 2 or values.nunique(dropna=True) < 2:
             continue
-        association = values.corr(merged["uplift"], method="spearman")
+        association = _spearman_if_variable(values, merged["uplift"])
         if pd.isna(association):
             continue
         rows.append(
@@ -145,7 +171,7 @@ def explain_cached_uplift_model(
         min(max_samples, len(frame)),
         random_state=42,
     )
-    base_uplift = np.asarray(model.predict_uplift(sample))
+    base_uplift = np.asarray(_predict_uplift_quietly(model, sample))
     rows: list[dict] = []
     for column in feature_columns:
         values = pd.to_numeric(sample[column], errors="coerce")
@@ -153,11 +179,11 @@ def explain_cached_uplift_model(
             continue
         permuted = sample.copy()
         permuted[column] = values.sample(frac=1.0, random_state=42).to_numpy()
-        permuted_uplift = np.asarray(model.predict_uplift(permuted))
+        permuted_uplift = np.asarray(_predict_uplift_quietly(model, permuted))
         importance = float(np.mean(np.abs(base_uplift - permuted_uplift)))
-        association = values.reset_index(drop=True).corr(
+        association = _spearman_if_variable(
+            values.reset_index(drop=True),
             pd.Series(base_uplift),
-            method="spearman",
         )
         rows.append(
             {
@@ -199,6 +225,22 @@ def explain_cached_uplift_model(
             "proof of treatment effect."
         ),
     }
+
+
+def _predict_uplift_quietly(model: object, frame: pd.DataFrame) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="X does not have valid feature names.*",
+            category=UserWarning,
+        )
+        return np.asarray(model.predict_uplift(frame))
+
+
+def _spearman_if_variable(left: pd.Series, right: pd.Series) -> float:
+    if left.nunique(dropna=True) < 2 or right.nunique(dropna=True) < 2:
+        return float("nan")
+    return float(left.corr(right, method="spearman"))
 
 
 def _align_features_to_scores(

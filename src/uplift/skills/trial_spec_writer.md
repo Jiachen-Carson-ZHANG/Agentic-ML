@@ -2,6 +2,11 @@
 
 Write one readable planning trial spec for the selected uplift strategy.
 
+If `feature_semantics` is provided, include the semantic rationale in
+`changes_from_previous` and the expected behavioral signal in
+`expected_improvement`. The feature recipe is an executable contract; do not
+invent a recipe name that is not in the provided strategy.
+
 Return JSON with:
 
 ```json

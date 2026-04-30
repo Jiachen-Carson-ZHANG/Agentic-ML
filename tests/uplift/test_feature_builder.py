@@ -1,4 +1,5 @@
 from pathlib import Path
+import warnings
 
 import pandas as pd
 import pytest
@@ -79,6 +80,18 @@ def test_build_feature_table_creates_one_labeled_customer_row_without_leakage_co
     assert set(artifact.generated_columns).issubset(set(feature_df.columns))
 
 
+def test_build_feature_table_does_not_emit_settingwithcopywarning(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.SettingWithCopyWarning)
+        build_feature_table(
+            _contract(),
+            recipe=_recipe(),
+            output_dir=tmp_path,
+            cohort="train",
+            chunksize=2,
+        )
+
+
 def test_build_feature_table_aggregates_purchase_rows_by_transaction(tmp_path):
     artifact = build_feature_table(
         _contract(),
@@ -155,6 +168,109 @@ def test_build_feature_table_filters_purchases_before_customer_issue_date(tmp_pa
     assert feature_df.loc["c002", "purchase_txn_count_lifetime"] == 1
 
 
+def test_post_issue_temporal_policy_keeps_customer_history_after_issue(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "clients.csv").write_text(
+        "\n".join(
+            [
+                "client_id,first_issue_date,first_redeem_date,age,gender",
+                "c001,2019-01-03 00:00:00,2019-01-10 00:00:00,31,F",
+                "c002,2019-01-05 00:00:00,2019-01-11 00:00:00,42,M",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "purchases.csv").write_text(
+        "\n".join(
+            [
+                "client_id,transaction_id,transaction_datetime,regular_points_received,express_points_received,regular_points_spent,express_points_spent,purchase_sum,store_id,product_id,product_quantity,trn_sum_from_iss,trn_sum_from_red",
+                "c001,t001,2019-01-02 12:00:00,1,0,0,0,100,store1,p001,1,100,",
+                "c001,t002,2019-01-04 12:00:00,1,0,0,0,900,store1,p001,1,900,",
+                "c002,t003,2019-01-04 12:00:00,1,0,0,0,200,store1,p001,1,200,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "uplift_train.csv").write_text(
+        "client_id,treatment_flg,target\nc001,1,1\nc002,0,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "uplift_test.csv").write_text(
+        "client_id\nc001\nc002\n",
+        encoding="utf-8",
+    )
+    contract = UpliftProjectContract(
+        task_name="retailhero-uplift",
+        table_schema=UpliftTableSchema(
+            clients_table=str(data_dir / "clients.csv"),
+            purchases_table=str(data_dir / "purchases.csv"),
+            train_table=str(data_dir / "uplift_train.csv"),
+            scoring_table=str(data_dir / "uplift_test.csv"),
+        ),
+    )
+    recipe = _recipe().model_copy(update={"temporal_policy": "post_issue_history"})
+
+    artifact = build_feature_table(
+        contract,
+        recipe=recipe,
+        output_dir=tmp_path / "features",
+        cohort="train",
+        chunksize=2,
+    )
+    feature_df = pd.read_csv(artifact.artifact_path).set_index("client_id")
+
+    assert feature_df.loc["c001", "purchase_txn_count_lifetime"] == 1
+    assert feature_df.loc["c001", "purchase_sum_lifetime"] == 900.0
+    assert feature_df.loc["c002", "purchase_txn_count_lifetime"] == 0
+
+
+def test_human_semantic_feature_groups_add_lifecycle_and_age_bucket_columns(tmp_path):
+    recipe = UpliftFeatureRecipeSpec(
+        source_tables=["clients", "purchases"],
+        feature_groups=[
+            "demographic",
+            "age_buckets",
+            "account_lifecycle",
+            "redeem_behavior",
+            "rfm",
+            "basket",
+            "points",
+        ],
+        windows_days=[30, 60, 90],
+        temporal_policy="post_issue_history",
+        semantic_name="human_semantic_v1",
+        builder_version="v2",
+    )
+
+    artifact = build_feature_table(
+        _contract(),
+        recipe=recipe,
+        output_dir=tmp_path,
+        cohort="train",
+        chunksize=2,
+    )
+    feature_df = pd.read_csv(artifact.artifact_path)
+
+    expected_columns = {
+        "age_le25",
+        "age_26_35",
+        "age_36_45",
+        "age_46_55",
+        "age_56_65",
+        "age_gt65",
+        "account_age_days",
+        "has_redeemed",
+        "days_to_first_redeem",
+        "purchase_txn_count_90d",
+    }
+    assert expected_columns.issubset(feature_df.columns)
+    assert artifact.temporal_policy == "post_issue_history"
+    assert artifact.semantic_name == "human_semantic_v1"
+
+
 def test_build_feature_table_records_computed_reference_date(tmp_path):
     artifact = build_feature_table(
         _contract(),
@@ -213,6 +329,25 @@ def test_build_feature_table_reuses_cached_artifact_without_rewriting(tmp_path):
 
     assert artifact_a.feature_artifact_id == artifact_b.feature_artifact_id
     assert Path(artifact_b.artifact_path).stat().st_mtime_ns == original_mtime
+
+
+def test_build_feature_table_emits_progress_messages(tmp_path):
+    messages = []
+
+    build_feature_table(
+        _contract(),
+        recipe=_recipe(),
+        output_dir=tmp_path,
+        cohort="train",
+        chunksize=2,
+        progress_logger=messages.append,
+    )
+
+    joined = "\n".join(messages)
+    assert "build start cohort=train" in joined
+    assert "purchase chunk" in joined
+    assert "aggregating 30d purchase features" in joined
+    assert "wrote feature artifact" in joined
 
 
 def test_validate_feature_table_rejects_duplicate_or_leaky_columns():

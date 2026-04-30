@@ -6,23 +6,28 @@ repo ledger and hypothesis store as the source of truth.
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from typing import get_args
 
 from src.models.uplift import (
     UpliftActionType,
     UpliftExperimentRecord,
+    UpliftFeatureSemanticsDecision,
     UpliftHypothesis,
 )
 from src.uplift.hypotheses import UpliftHypothesisStore, transition_hypothesis
 from src.uplift.ledger import UpliftLedger
 from src.uplift.llm_client import ChatLLM
-from src.uplift.templates import REGISTERED_UPLIFT_TEMPLATES
+from src.uplift.templates import (
+    REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS,
+    REGISTERED_UPLIFT_TEMPLATES,
+)
 
 _SKILLS_DIR = Path(__file__).parent / "skills"
 _VALID_ACTION_TYPES: frozenset[str] = frozenset(get_args(UpliftActionType))
@@ -30,15 +35,61 @@ _VALID_ACTION_TYPES: frozenset[str] = frozenset(get_args(UpliftActionType))
 _ESTIMATOR_DEFAULTS: dict[str, dict[str, Any]] = {
     "logistic_regression": {"C": 1.0, "max_iter": 1000},
     "gradient_boosting": {
-        "n_estimators": 50,
-        "learning_rate": 0.05,
+        "n_estimators": 200,
+        "learning_rate": 0.03,
         "max_depth": 2,
+        "min_samples_leaf": 50,
+        "subsample": 0.7,
     },
-    "xgboost": {"n_estimators": 100, "max_depth": 5, "learning_rate": 0.1},
-    "lightgbm": {"n_estimators": 100, "max_depth": 5, "learning_rate": 0.1},
+    "random_forest": {
+        "n_estimators": 300,
+        "max_depth": 4,
+        "min_samples_leaf": 100,
+        "n_jobs": -1,
+    },
+    "xgboost": {
+        "n_estimators": 400,
+        "max_depth": 2,
+        "learning_rate": 0.03,
+        "subsample": 0.7,
+        "colsample_bytree": 0.7,
+        "reg_lambda": 10.0,
+        "min_child_weight": 20,
+    },
+    "lightgbm": {
+        "n_estimators": 400,
+        "max_depth": 3,
+        "learning_rate": 0.03,
+        "subsample": 0.7,
+        "colsample_bytree": 0.7,
+        "num_leaves": 15,
+        "min_child_samples": 100,
+        "reg_lambda": 10.0,
+    },
     "catboost": {"iterations": 100, "depth": 5, "learning_rate": 0.1},
 }
-_WARMUP_ORDER = ["response_model", "solo_model", "two_model", "class_transformation"]
+_OPTIONAL_ESTIMATOR_IMPORTS = {
+    "xgboost": "xgboost",
+    "lightgbm": "lightgbm",
+    "catboost": "catboost",
+}
+_MINIMAL_WARMUP_CANDIDATES: list[tuple[str, str]] = []
+_POST_WARMUP_EXPLORATION_PRIORITY = [
+    ("class_transformation", "logistic_regression"),
+    ("class_transformation", "gradient_boosting"),
+    ("class_transformation", "xgboost"),
+    ("class_transformation", "lightgbm"),
+    ("solo_model", "xgboost"),
+    ("solo_model", "lightgbm"),
+    ("two_model", "gradient_boosting"),
+    ("two_model", "xgboost"),
+    ("two_model", "lightgbm"),
+    ("solo_model", "gradient_boosting"),
+    ("two_model", "random_forest"),
+    ("class_transformation", "random_forest"),
+    ("solo_model", "random_forest"),
+    ("solo_model", "logistic_regression"),
+]
 
 
 @dataclass
@@ -58,6 +109,7 @@ class HypothesisDecision:
     evidence: str
     confidence: float
     experiment_action_type: str = "recipe_comparison"
+    hypothesis_id: str = ""
 
 
 @dataclass
@@ -68,6 +120,10 @@ class UpliftStrategy:
     split_seed: int
     eval_cutoff: float
     rationale: str
+    feature_semantics_rationale: str = ""
+    expected_feature_signal: str = ""
+    temporal_policy: str = ""
+    xai_sanity_checks: list[str] | None = None
 
 
 @dataclass
@@ -86,6 +142,11 @@ class PlanningTrialSpec:
     expected_improvement: str
     model: str
     stop_criteria: str
+    feature_semantics_rationale: str = ""
+    feature_expected_signal: str = ""
+    temporal_policy: str = ""
+    xai_sanity_checks: list[str] | None = None
+    source_hypothesis_id: str = ""
 
 
 def _load_skill(name: str) -> str:
@@ -182,6 +243,55 @@ class CaseRetrievalAgent:
         )
 
 
+class FeatureSemanticsAgent:
+    """Choose an approved semantic feature recipe before model strategy selection."""
+
+    _SKILL = _load_skill("feature_semantics")
+
+    def __init__(self, ledger: UpliftLedger, llm: ChatLLM) -> None:
+        self.ledger = ledger
+        self.llm = llm
+
+    def run(
+        self,
+        *,
+        context: RetrievedContext,
+        available_feature_recipes: Sequence[str],
+    ) -> UpliftFeatureSemanticsDecision:
+        approved = list(available_feature_recipes) or ["rfm_baseline"]
+        parsed = _call_llm_strict(
+            self.llm,
+            self._SKILL,
+            json.dumps(
+                {
+                    "available_feature_recipes": approved,
+                    "context_summary": context.summary,
+                    "prior_records": [
+                        _record_summary(record) for record in self.ledger.load()
+                    ],
+                    "selection_policy": (
+                        "Choose a recipe that can test whether richer behavioral "
+                        "semantics reduce suspicious age-only XAI dominance."
+                    ),
+                },
+                sort_keys=True,
+            ),
+        )
+        decision = UpliftFeatureSemanticsDecision.model_validate(parsed)
+        if decision.feature_recipe in approved:
+            return decision
+        fallback = "rfm_baseline" if "rfm_baseline" in approved else approved[0]
+        return decision.model_copy(
+            update={
+                "feature_recipe": fallback,
+                "rationale": (
+                    f"LLM proposed unavailable recipe {decision.feature_recipe}; "
+                    f"fell back to approved recipe {fallback}. {decision.rationale}"
+                ),
+            }
+        )
+
+
 class HypothesisReasoningAgent:
     """Choose the next hypothesis action and keep the hypothesis store in sync."""
 
@@ -204,6 +314,16 @@ class HypothesisReasoningAgent:
                 "latest_trial_result": _record_summary(latest_record)
                 if latest_record is not None
                 else None,
+                "constraints": {
+                    "excluded_champion_families": ["response_model", "random"],
+                    "unsupported_learners": ["causal_forest"],
+                    "available_model_pairs": _available_strategy_pairs(),
+                    "current_feature_recipe": {
+                        "name": "rfm_baseline",
+                        "feature_groups": ["demographic", "rfm", "basket", "points"],
+                        "note": "RFM-style recency, frequency, and monetary aggregates already exist.",
+                    },
+                },
             },
             sort_keys=True,
         )
@@ -215,19 +335,28 @@ class HypothesisReasoningAgent:
         experiment_action_type = (
             raw_action_type if raw_action_type in _VALID_ACTION_TYPES else "recipe_comparison"
         )
+        hypothesis_text = _sanitize_hypothesis_text(
+            parsed.get("hypothesis", current_hypothesis or "")
+        )
+        evidence = _sanitize_hypothesis_text(parsed.get("evidence", ""))
         decision = HypothesisDecision(
             action=parsed.get("action", "propose"),
-            hypothesis=parsed.get("hypothesis", current_hypothesis or ""),
-            evidence=parsed.get("evidence", ""),
+            hypothesis=hypothesis_text,
+            evidence=evidence,
             confidence=float(parsed.get("confidence", 0.5)),
             experiment_action_type=experiment_action_type,
         )
-        self._sync_hypothesis_store(decision)
+        stored = self._sync_hypothesis_store(decision)
+        if stored is not None:
+            decision.hypothesis_id = stored.hypothesis_id
         return decision
 
-    def _sync_hypothesis_store(self, decision: HypothesisDecision) -> None:
+    def _sync_hypothesis_store(
+        self,
+        decision: HypothesisDecision,
+    ) -> UpliftHypothesis | None:
         if not decision.hypothesis:
-            return
+            return None
         active = (
             self.store.query_by_status("proposed")
             + self.store.query_by_status("under_test")
@@ -245,12 +374,10 @@ class HypothesisReasoningAgent:
                 expected_signal=decision.evidence or "improved qini_auc",
                 status="proposed",
             )
-            self.store.append(hypothesis)
-            return
-        if decision.action == "validate":
-            self.store.append(transition_hypothesis(match, "supported"))
-        elif decision.action == "refute":
-            self.store.append(transition_hypothesis(match, "contradicted"))
+            return self.store.append(hypothesis)
+        if decision.action in {"validate", "refute"} and match.status == "proposed":
+            return self.store.append(transition_hypothesis(match, "under_test"))
+        return match
 
 
 class UpliftStrategySelectionAgent:
@@ -262,23 +389,67 @@ class UpliftStrategySelectionAgent:
         self.ledger = ledger
         self.llm = llm
 
-    def run(self, hypothesis: HypothesisDecision, context: RetrievedContext) -> UpliftStrategy:
+    def run(
+        self,
+        hypothesis: HypothesisDecision,
+        context: RetrievedContext,
+        feature_decision: UpliftFeatureSemanticsDecision | None = None,
+        available_feature_recipes: Sequence[str] | None = None,
+    ) -> UpliftStrategy:
         records = self.ledger.load()
-        successful = [record for record in records if record.status == "success"]
-        if len(successful) < len(_WARMUP_ORDER):
-            used = {record.uplift_learner_family for record in successful}
-            family = next((item for item in _WARMUP_ORDER if item not in used), _WARMUP_ORDER[0])
+        successful_records = [record for record in records if record.status == "success"]
+        successful = [
+            record
+            for record in successful_records
+            if record.hypothesis_id != "manual_baseline"
+        ]
+        approved_recipes = list(available_feature_recipes or ["rfm_baseline"])
+        selected_recipe = (
+            feature_decision.feature_recipe
+            if feature_decision is not None
+            else "rfm_baseline"
+        )
+        if selected_recipe not in approved_recipes:
+            selected_recipe = "rfm_baseline" if "rfm_baseline" in approved_recipes else approved_recipes[0]
+        warmup_candidates = _available_autonomous_warmup_candidates()
+        if len(successful) < len(warmup_candidates):
+            used = {
+                (record.uplift_learner_family, record.base_estimator)
+                for record in successful
+            }
+            family, estimator = next(
+                (
+                    candidate
+                    for candidate in warmup_candidates
+                    if candidate not in used
+                ),
+                warmup_candidates[0],
+            )
             return UpliftStrategy(
                 learner_family=family,
-                base_estimator="logistic_regression",
-                feature_recipe="rfm_baseline",
+                base_estimator=estimator,
+                feature_recipe=selected_recipe,
                 split_seed=42,
                 eval_cutoff=0.3,
-                rationale=f"Warm-up trial for {family}.",
+                rationale=f"Warm-up trial for {family} with {estimator}.",
+                feature_semantics_rationale=feature_decision.rationale
+                if feature_decision is not None
+                else "",
+                expected_feature_signal=feature_decision.expected_signal
+                if feature_decision is not None
+                else "",
+                temporal_policy=feature_decision.temporal_policy
+                if feature_decision is not None
+                else "",
+                xai_sanity_checks=feature_decision.xai_sanity_checks
+                if feature_decision is not None
+                else [],
             )
 
         mean_qini = _mean_qini_by_family(successful)
         best_family = max(mean_qini, key=mean_qini.get)
+        used_pairs = _used_strategy_pairs(successful_records)
+        unused_pairs = _unused_strategy_pairs(successful_records)
         # Strict parsing: strategy selection is the contract for which template
         # the trial executes. A garbage default would silently pick the wrong runner.
         parsed = _call_llm_strict(
@@ -286,25 +457,67 @@ class UpliftStrategySelectionAgent:
             self._SKILL,
             json.dumps(
                 {
+                    "available_model_pairs": _available_strategy_pairs(),
+                    "used_model_pairs": [
+                        [family, estimator] for family, estimator in sorted(used_pairs)
+                    ],
+                    "unused_model_pairs": [
+                        [family, estimator] for family, estimator in unused_pairs
+                    ],
                     "mean_qini_by_family": mean_qini,
                     "best_family_so_far": best_family,
                     "context_summary": context.summary,
                     "active_hypothesis": hypothesis.hypothesis,
+                    "feature_semantics": feature_decision.model_dump()
+                    if feature_decision is not None
+                    else None,
+                    "available_feature_recipes": approved_recipes,
+                    "selection_policy": (
+                        "After the minimal warmup, choose the next uplift "
+                        "learner from ledger evidence. Prefer held-out stability "
+                        "over validation-only gains. Do not choose a pair from "
+                        "used_model_pairs while unused_model_pairs is non-empty."
+                    ),
                 },
                 sort_keys=True,
             ),
         )
-        family = _safe_learner_family(parsed.get("learner_family", best_family), best_family)
-        estimator = parsed.get("base_estimator", "logistic_regression")
-        if estimator not in _ESTIMATOR_DEFAULTS:
-            estimator = "logistic_regression"
+        family, estimator = _safe_strategy_pair(
+            parsed.get("learner_family", best_family),
+            parsed.get("base_estimator", "gradient_boosting"),
+            fallback_family=best_family,
+            fallback_estimator="gradient_boosting",
+        )
+        family, estimator, replacement_note = _replace_used_strategy_pair(
+            family,
+            estimator,
+            successful_records,
+        )
+        rationale = parsed.get("rationale", "")
+        if replacement_note:
+            rationale = f"{replacement_note} {rationale}".strip()
+        feature_recipe = parsed.get("feature_recipe", selected_recipe)
+        if feature_recipe not in approved_recipes:
+            feature_recipe = selected_recipe
         return UpliftStrategy(
             learner_family=family,
             base_estimator=estimator,
-            feature_recipe=parsed.get("feature_recipe", "rfm_baseline"),
+            feature_recipe=feature_recipe,
             split_seed=int(parsed.get("split_seed", 42)),
             eval_cutoff=float(parsed.get("eval_cutoff", 0.3)),
-            rationale=parsed.get("rationale", ""),
+            rationale=rationale,
+            feature_semantics_rationale=feature_decision.rationale
+            if feature_decision is not None
+            else "",
+            expected_feature_signal=feature_decision.expected_signal
+            if feature_decision is not None
+            else "",
+            temporal_policy=feature_decision.temporal_policy
+            if feature_decision is not None
+            else "",
+            xai_sanity_checks=feature_decision.xai_sanity_checks
+            if feature_decision is not None
+            else [],
         )
 
     def estimator_params(self, estimator: str) -> dict[str, Any]:
@@ -339,21 +552,39 @@ class TrialSpecWriterAgent:
                     "evidence": hypothesis.evidence,
                     "strategy": asdict(strategy),
                     "estimator_params": estimator_params,
+                    "feature_semantics": {
+                        "rationale": strategy.feature_semantics_rationale,
+                        "expected_signal": strategy.expected_feature_signal,
+                        "temporal_policy": strategy.temporal_policy,
+                        "xai_sanity_checks": strategy.xai_sanity_checks or [],
+                    },
                 },
                 sort_keys=True,
             ),
         )
+        changes_from_previous = parsed.get("changes_from_previous", "N/A")
+        expected_improvement = parsed.get("expected_improvement", "N/A")
+        if strategy.feature_semantics_rationale and strategy.feature_semantics_rationale not in changes_from_previous:
+            changes_from_previous = (
+                f"{changes_from_previous} Feature semantics: "
+                f"{strategy.feature_semantics_rationale}"
+            )
+        if strategy.expected_feature_signal and strategy.expected_feature_signal not in expected_improvement:
+            expected_improvement = (
+                f"{expected_improvement} Expected feature signal: "
+                f"{strategy.expected_feature_signal}"
+            )
         return PlanningTrialSpec(
             trial_id=trial_id,
             hypothesis=parsed.get("hypothesis", hypothesis.hypothesis),
             learner_family=strategy.learner_family,
             base_estimator=strategy.base_estimator,
-            feature_recipe=parsed.get("feature_recipe", strategy.feature_recipe),
+            feature_recipe=strategy.feature_recipe,
             params=parsed.get("params", estimator_params),
             split_seed=strategy.split_seed,
             eval_cutoff=strategy.eval_cutoff,
-            changes_from_previous=parsed.get("changes_from_previous", "N/A"),
-            expected_improvement=parsed.get("expected_improvement", "N/A"),
+            changes_from_previous=changes_from_previous,
+            expected_improvement=expected_improvement,
             model=parsed.get(
                 "model",
                 f"{strategy.learner_family} + {strategy.base_estimator}",
@@ -362,6 +593,11 @@ class TrialSpecWriterAgent:
                 "stop_criteria",
                 "Stop if Qini AUC does not improve after 3 trials.",
             ),
+            feature_semantics_rationale=strategy.feature_semantics_rationale,
+            feature_expected_signal=strategy.expected_feature_signal,
+            temporal_policy=strategy.temporal_policy,
+            xai_sanity_checks=strategy.xai_sanity_checks or [],
+            source_hypothesis_id=hypothesis.hypothesis_id,
         )
 
 
@@ -373,11 +609,14 @@ class ExperimentPlanningPhase:
         ledger: UpliftLedger,
         hypothesis_store: UpliftHypothesisStore,
         llm: ChatLLM,
+        available_feature_recipes: Sequence[str] | None = None,
     ) -> None:
         self.case_retrieval = CaseRetrievalAgent(ledger, llm)
+        self.feature_semantics = FeatureSemanticsAgent(ledger, llm)
         self.hypothesis_reasoning = HypothesisReasoningAgent(hypothesis_store, llm)
         self.strategy_selection = UpliftStrategySelectionAgent(ledger, llm)
         self.trial_spec_writer = TrialSpecWriterAgent(ledger, llm)
+        self.available_feature_recipes = list(available_feature_recipes or ["rfm_baseline"])
 
     def run(self, current_hypothesis: str | None = None) -> PlanningTrialSpec:
         context = self.case_retrieval.run()
@@ -387,8 +626,17 @@ class ExperimentPlanningPhase:
             if records
             else None
         )
+        feature_decision = self.feature_semantics.run(
+            context=context,
+            available_feature_recipes=self.available_feature_recipes,
+        )
         hypothesis = self.hypothesis_reasoning.run(context, current_hypothesis, latest)
-        strategy = self.strategy_selection.run(hypothesis, context)
+        strategy = self.strategy_selection.run(
+            hypothesis,
+            context,
+            feature_decision,
+            self.available_feature_recipes,
+        )
         params = self.strategy_selection.estimator_params(strategy.base_estimator)
         return self.trial_spec_writer.run(hypothesis, strategy, params)
 
@@ -402,10 +650,14 @@ def _record_summary(record: UpliftExperimentRecord | None) -> dict[str, Any] | N
         "base_estimator": record.base_estimator,
         "feature_recipe_id": record.feature_recipe_id,
         "qini_auc": record.qini_auc,
+        "held_out_qini_auc": record.held_out_qini_auc,
         "uplift_auc": record.uplift_auc,
         "status": record.status,
         "verdict": record.verdict,
         "error": record.error,
+        "xai_summary": record.xai_summary,
+        "strategy_rationale": record.strategy_rationale,
+        "feature_semantics_rationale": record.feature_semantics_rationale,
         "next_actions": record.next_recommended_actions,
     }
 
@@ -419,9 +671,175 @@ def _mean_qini_by_family(records: list[UpliftExperimentRecord]) -> dict[str, flo
         family: sum(scores) / len(scores)
         for family, scores in values.items()
         if scores
-    } or {"response_model": 0.0}
+    } or {"two_model": 0.0}
+
+
+def _sanitize_hypothesis_text(text: str) -> str:
+    sanitized = str(text or "").strip()
+    lower = sanitized.lower()
+    mentions_response_only = (
+        "response_model" in lower
+        or "response model" in lower
+        or "response-only" in lower
+    )
+    asserts_missing_rfm = "rfm" in lower and any(
+        phrase in lower
+        for phrase in [
+            "no explicit",
+            "absent",
+            "lacks",
+            "lack ",
+            "without",
+            "not include",
+            "none",
+        ]
+    )
+    mentions_unsupported_causal_forest = (
+        "causal forest" in lower
+        or "causal_forest" in lower
+        or "causal-forest" in lower
+    )
+    if mentions_unsupported_causal_forest:
+        return (
+            "Compare registered random-forest and boosted uplift templates "
+            "rather than unimplemented causal-forest learners."
+        )
+    if mentions_response_only or asserts_missing_rfm:
+        return (
+            "Compare eligible uplift learners on the existing RFM baseline "
+            "feature recipe, prioritizing two-model and class-transformation "
+            "variants with stronger tree-based estimators."
+        )
+    return sanitized
+
+
+def _used_strategy_pairs(records: list[UpliftExperimentRecord]) -> set[tuple[str, str]]:
+    return {
+        (record.uplift_learner_family, record.base_estimator)
+        for record in records
+        if record.status == "success"
+    }
+
+
+def _unused_strategy_pairs(records: list[UpliftExperimentRecord]) -> list[tuple[str, str]]:
+    used = _used_strategy_pairs(records)
+    available = [tuple(pair) for pair in _available_strategy_pairs()]
+    return [pair for pair in _rank_strategy_pairs(available) if pair not in used]
+
+
+def _rank_strategy_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    priority = {
+        pair: index for index, pair in enumerate(_POST_WARMUP_EXPLORATION_PRIORITY)
+    }
+    family_rank = {"two_model": 0, "class_transformation": 1, "solo_model": 2}
+    estimator_rank = {
+        "xgboost": 0,
+        "lightgbm": 1,
+        "random_forest": 2,
+        "gradient_boosting": 3,
+        "logistic_regression": 4,
+    }
+    return sorted(
+        pairs,
+        key=lambda pair: (
+            priority.get(pair, 999),
+            family_rank.get(pair[0], 999),
+            estimator_rank.get(pair[1], 999),
+            pair,
+        ),
+    )
+
+
+def _replace_used_strategy_pair(
+    family: str,
+    estimator: str,
+    records: list[UpliftExperimentRecord],
+) -> tuple[str, str, str]:
+    if (family, estimator) not in _used_strategy_pairs(records):
+        return family, estimator, ""
+    unused = _unused_strategy_pairs(records)
+    if not unused:
+        return (
+            family,
+            estimator,
+            "All available model pairs already ran; allowing parameter variation.",
+        )
+    replacement_family, replacement_estimator = unused[0]
+    return (
+        replacement_family,
+        replacement_estimator,
+        (
+            f"LLM proposed {family}+{estimator}, but that model pair already ran; "
+            f"switched to {replacement_family}+{replacement_estimator}."
+        ),
+    )
 
 
 def _safe_learner_family(candidate: str, fallback: str) -> str:
-    executable_families = set(REGISTERED_UPLIFT_TEMPLATES.values()) - {"random"}
-    return candidate if candidate in executable_families else fallback
+    executable_families = set(REGISTERED_UPLIFT_TEMPLATES.values()) - {
+        "random",
+        "response_model",
+    }
+    safe_fallback = fallback if fallback in executable_families else "two_model"
+    return candidate if candidate in executable_families else safe_fallback
+
+
+def _safe_base_estimator(candidate: str, fallback: str) -> str:
+    safe_fallback = (
+        fallback
+        if fallback in _ESTIMATOR_DEFAULTS and _is_estimator_available(fallback)
+        else "gradient_boosting"
+    )
+    if candidate not in _ESTIMATOR_DEFAULTS:
+        return safe_fallback
+    if not _is_estimator_available(candidate):
+        return safe_fallback
+    return candidate
+
+
+def _safe_strategy_pair(
+    candidate_family: str,
+    candidate_estimator: str,
+    *,
+    fallback_family: str,
+    fallback_estimator: str,
+) -> tuple[str, str]:
+    family = _safe_learner_family(candidate_family, fallback_family)
+    estimator = _safe_base_estimator(candidate_estimator, fallback_estimator)
+    available = {tuple(pair) for pair in _available_strategy_pairs()}
+    if (family, estimator) in available:
+        return family, estimator
+    fallback_pair = (
+        _safe_learner_family(fallback_family, "two_model"),
+        _safe_base_estimator(fallback_estimator, "gradient_boosting"),
+    )
+    if fallback_pair in available:
+        return fallback_pair
+    return "two_model", "gradient_boosting"
+
+
+def _available_autonomous_warmup_candidates() -> list[tuple[str, str]]:
+    return [
+        candidate
+        for candidate in _MINIMAL_WARMUP_CANDIDATES
+        if candidate in {tuple(pair) for pair in _available_strategy_pairs()}
+    ]
+
+
+def _available_strategy_pairs() -> list[list[str]]:
+    pairs: list[tuple[str, str]] = []
+    for template_name, family in REGISTERED_UPLIFT_TEMPLATES.items():
+        if family in {"random", "response_model"}:
+            continue
+        estimator = REGISTERED_UPLIFT_TEMPLATE_BASE_ESTIMATORS.get(template_name)
+        if estimator is None or not _is_estimator_available(estimator):
+            continue
+        pair = (family, estimator)
+        if pair not in pairs:
+            pairs.append(pair)
+    return [[family, estimator] for family, estimator in sorted(pairs)]
+
+
+def _is_estimator_available(estimator: str) -> bool:
+    module_name = _OPTIONAL_ESTIMATOR_IMPORTS.get(estimator)
+    return module_name is None or importlib.util.find_spec(module_name) is not None

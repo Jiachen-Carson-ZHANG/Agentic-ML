@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import numpy as np
 import pandas as pd
@@ -127,3 +127,110 @@ def split_labeled_uplift_frame(
         strategy=decision.strategy,
         warnings=decision.warnings,
     )
+
+
+def diagnose_uplift_split(
+    split: UpliftSplitFrames,
+    contract: UpliftProjectContract,
+    *,
+    min_eval_rows: int = 100,
+    max_rate_delta: float = 0.03,
+) -> dict[str, Any]:
+    """Return treatment/outcome balance diagnostics for one concrete split.
+
+    These diagnostics are intentionally pre-model: they answer whether the
+    validation/test partitions are usable evaluation surfaces before any learner
+    has a chance to overfit or produce suspicious Qini values.
+    """
+    partitions = {
+        "train": split.train,
+        "validation": split.validation,
+        "test": split.test,
+    }
+    full = pd.concat(
+        [frame for frame in partitions.values() if not frame.empty],
+        ignore_index=True,
+    )
+    reference = _partition_stats(
+        full,
+        treatment_col=contract.treatment_column,
+        target_col=contract.target_column,
+    )
+    partition_stats = {
+        name: _partition_stats(
+            frame,
+            treatment_col=contract.treatment_column,
+            target_col=contract.target_column,
+        )
+        for name, frame in partitions.items()
+    }
+
+    warnings = list(split.warnings)
+    for name in ["validation", "test"]:
+        stats = partition_stats[name]
+        if stats["n_rows"] == 0:
+            continue
+        if stats["n_rows"] < min_eval_rows:
+            warnings.append(
+                f"{name} has {stats['n_rows']} rows; minimum reliable evaluation rows is {min_eval_rows}"
+            )
+        for metric in ["treatment_rate", "target_rate"]:
+            delta = abs((stats[metric] or 0.0) - (reference[metric] or 0.0))
+            if delta > max_rate_delta:
+                warnings.append(
+                    f"{name} {metric} differs from full data by {delta:.4f}"
+                )
+        if stats["min_joint_count"] < 1:
+            warnings.append(f"{name} is missing at least one treatment/outcome cell")
+
+    return {
+        "reliable": not warnings,
+        "strategy": split.strategy,
+        "warnings": warnings,
+        "reference": reference,
+        "partitions": partition_stats,
+    }
+
+
+def _partition_stats(
+    frame: pd.DataFrame,
+    *,
+    treatment_col: str,
+    target_col: str,
+) -> dict[str, Any]:
+    if frame.empty:
+        return {
+            "n_rows": 0,
+            "treatment_rate": None,
+            "target_rate": None,
+            "treated_response_rate": None,
+            "control_response_rate": None,
+            "joint_counts": {},
+            "min_joint_count": 0,
+        }
+    treatment = frame[treatment_col].astype(int)
+    target = frame[target_col].astype(int)
+    treated = target[treatment == 1]
+    control = target[treatment == 0]
+    joint_counts = {
+        f"t{int(t_value)}_y{int(y_value)}": int(count)
+        for (t_value, y_value), count in frame.groupby([treatment_col, target_col]).size().items()
+    }
+    all_joint_counts = [
+        joint_counts.get(f"t{t_value}_y{y_value}", 0)
+        for t_value in [0, 1]
+        for y_value in [0, 1]
+    ]
+    return {
+        "n_rows": int(len(frame)),
+        "treatment_rate": round(float(treatment.mean()), 6),
+        "target_rate": round(float(target.mean()), 6),
+        "treated_response_rate": None
+        if treated.empty
+        else round(float(treated.mean()), 6),
+        "control_response_rate": None
+        if control.empty
+        else round(float(control.mean()), 6),
+        "joint_counts": joint_counts,
+        "min_joint_count": int(min(all_joint_counts)),
+    }
