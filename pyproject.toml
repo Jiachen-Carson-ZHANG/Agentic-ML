@@ -26,12 +26,20 @@ boosters = [
 xai = [
   "shap>=0.44.0",
 ]
+notebook = [
+  "matplotlib>=3.8.0",
+  "scipy>=1.11.0",
+  "scikit-uplift>=0.5.1",
+]
 all = [
   "pytest>=8.0.0",
   "xgboost>=2.0.0",
   "lightgbm>=4.0.0",
   "catboost>=1.2.0",
   "shap>=0.44.0",
+  "matplotlib>=3.8.0",
+  "scipy>=1.11.0",
+  "scikit-uplift>=0.5.1",
 ]
 
 [tool.setuptools.packages.find]
