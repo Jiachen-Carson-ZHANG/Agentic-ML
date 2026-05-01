@@ -24,6 +24,7 @@ from src.models.uplift import (  # noqa: E402
     UpliftTableSchema,
     UpliftTrialSpec,
 )
+from src.uplift.eda import run_eda_phase  # noqa: E402
 from src.uplift.features import build_feature_tables_multi_recipe  # noqa: E402
 from src.uplift.hypotheses import UpliftHypothesisStore  # noqa: E402
 from src.uplift.ledger import UpliftLedger  # noqa: E402
@@ -482,7 +483,7 @@ def main() -> int:
         api_key = _api_key_for_provider(provider)
         print(f"Log file: {log_path}")
         print(
-            "Stage 1/7: configuration "
+            "Stage 1/8: configuration "
             f"provider={provider}, planning_model={planning_model}, "
             f"evaluation_model={evaluation_model}, max_iterations={max_iterations}, "
             f"retry_max_trials={retry_max_trials}, "
@@ -491,8 +492,9 @@ def main() -> int:
             f"semantic_features={semantic_features}, recipes={recipe_names}"
         )
 
-        print("Stage 2/7: contract and dataset validation")
+        print("Stage 2/8: contract and dataset validation")
         contract = _build_contract(data_dir, small_fixture_mode=args.small_fixture_mode)
+        planner_llm = make_chat_llm(provider, planning_model, api_key)
         validation = validate_uplift_dataset(contract)
         train_df = pd.read_csv(contract.table_schema.train_table)
         balance = compute_treatment_control_balance(
@@ -504,7 +506,21 @@ def main() -> int:
         if not validation.valid:
             raise RuntimeError(f"Dataset validation failed: {validation.errors}")
 
-        print("Stage 3/7: feature artifacts")
+        print("Stage 3/8: EDA agent")
+        eda_report = run_eda_phase(
+            contract,
+            planner_llm,
+            output_dir=output_dir / "eda",
+            purchases_sample_rows=args.chunksize,
+        )
+        print(
+            "[eda] "
+            f"findings={len(eda_report.findings)} "
+            f"drafted_hypotheses={len(eda_report.drafted_hypotheses)} "
+            f"ate={eda_report.average_treatment_effect}"
+        )
+
+        print("Stage 4/8: feature artifacts")
         feature_dir = output_dir / "features"
         train_artifacts_by_name = _build_feature_artifact_map(
             contract,
@@ -522,11 +538,10 @@ def main() -> int:
         )
         train_artifact = train_artifacts_by_name[recipe_names[0]]
 
-        print("Stage 4/7: autonomous planning, execution, evaluation, and retry")
+        print("Stage 5/8: autonomous planning, execution, evaluation, and retry")
         run_dir = output_dir / "runs"
         ledger = UpliftLedger(run_dir / "uplift_ledger.jsonl")
         hypothesis_store = UpliftHypothesisStore(output_dir / "hypotheses.jsonl")
-        planner_llm = make_chat_llm(provider, planning_model, api_key)
         evaluation_llm = make_chat_llm(provider, evaluation_model, api_key)
         planner = ExperimentPlanningPhase(
             ledger,
@@ -548,7 +563,7 @@ def main() -> int:
         ).run(max_iterations=max_iterations)
         retry_snapshot = result.retry_decision
 
-        print("Stage 5/7: submission preview")
+        print("Stage 6/8: submission preview")
         records = ledger.load()
         agentic_tuning_plan_path = None
         agentic_tuning_trial_specs = 0
@@ -567,7 +582,7 @@ def main() -> int:
         )
         validate_submission_artifact(contract, submission)
 
-        print("Stage 6/7: ledger summary")
+        print("Stage 7/8: ledger summary")
         for record in records:
             print(
                 f"- {record.run_id}: {record.template_name} "
@@ -597,7 +612,7 @@ def main() -> int:
                 f"trial_specs={agentic_tuning_trial_specs}"
             )
 
-        print("Stage 7/7: final artifact index")
+        print("Stage 8/8: final artifact index")
         summary = {
             "provider": provider,
             "planning_model": planning_model,
@@ -617,6 +632,9 @@ def main() -> int:
             "agentic_tuning_candidate_templates": agentic_tuning_candidate_templates,
             "dataset_rows": validation.table_rows,
             "balance_warnings": balance.warnings,
+            "eda_report_path": str(output_dir / "eda" / "eda_report.json"),
+            "eda_findings": len(eda_report.findings),
+            "eda_drafted_hypotheses": len(eda_report.drafted_hypotheses),
             "n_agent_trials": len(result.trial_records),
             "n_evaluation_results": len(result.evaluation_results),
             "n_ledger_records": len(records),

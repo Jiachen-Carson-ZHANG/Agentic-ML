@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,11 +46,15 @@ def test_autonomous_pipeline_demo_runs_with_stub_llm(tmp_path):
     assert "human_semantic_v1" in summary["train_feature_artifacts"]
     assert summary["report_path"].endswith("final_report.md")
     assert summary["submission_path"].endswith("uplift_submission.csv")
+    assert summary["eda_findings"] >= 1
+    assert summary["eda_drafted_hypotheses"] >= 1
+    assert Path(summary["eda_report_path"]).exists()
 
     log_path = output_dir / "pipeline.log"
     assert log_path.exists()
     log_text = log_path.read_text()
-    assert "Stage 1/7: configuration" in log_text
+    assert "Stage 1/8: configuration" in log_text
+    assert "Stage 3/8: EDA agent" in log_text
     assert "[features] build start cohort=train" in log_text
     assert "[features] purchase chunk" in log_text
     assert "FINAL SUMMARY TABLE" in log_text

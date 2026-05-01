@@ -302,6 +302,70 @@ def _stub_chat(system: str, user: str) -> str:
     """Deterministic offline stub for tests and demos without API keys."""
     system_l = system.lower()
     payload = _parse_stub_payload(user)
+    if "eda hypothesis" in system_l or "eda evidence" in system_l:
+        findings = payload.get("findings", []) if isinstance(payload, dict) else []
+        segment_candidates = (
+            payload.get("segment_response_candidates", [])
+            if isinstance(payload, dict)
+            else []
+        )
+        top_segment = segment_candidates[0] if segment_candidates else {}
+        segment_name = top_segment.get("segment", "high-response demographic slice")
+        return json.dumps(
+            {
+                "summary": (
+                    "The EDA profile shows a randomized uplift dataset with "
+                    "transaction history suitable for behavioral recency, spend, "
+                    "frequency, product breadth, and demographic segmentation hypotheses."
+                ),
+                "hypotheses": [
+                    {
+                        "hypothesis": (
+                            "Recent and moderately active customers will have higher "
+                            "positive treatment uplift than very inactive or already "
+                            "high-propensity customers."
+                        ),
+                        "rationale": (
+                            "Deterministic findings indicate available purchase history "
+                            "and treatment-control response variation across customer slices."
+                        ),
+                        "suggested_features": [
+                            "recency_days",
+                            "txn_count",
+                            "purchase_sum",
+                            "basket_breadth",
+                        ],
+                        "segment_idea": "Persuadable recent active customers",
+                        "risk_or_guardrail": (
+                            "Build features only from leakage-safe pre-decision history "
+                            "and validate uplift on held-out rows."
+                        ),
+                    },
+                    {
+                        "hypothesis": (
+                            f"The {segment_name} segment may contain customers with "
+                            "different treatment responsiveness."
+                        ),
+                        "rationale": (
+                            "The EDA segment scan ranks this slice among the largest "
+                            "descriptive treatment-control response gaps."
+                        ),
+                        "suggested_features": ["age_band", "gender", "account_age_days"],
+                        "segment_idea": str(segment_name),
+                        "risk_or_guardrail": (
+                            "Treat demographic gaps as hypothesis seeds only; check "
+                            "stability and fairness before policy use."
+                        ),
+                    },
+                ],
+                "recommended_next_checks": [
+                    "Compare uplift metrics for recency/frequency feature recipes.",
+                    "Run segment-level treatment-control response diagnostics on validation data.",
+                    "Use XAI to check whether behavior or demographics dominate uplift ranking.",
+                ],
+                "finding_count": len(findings) if isinstance(findings, list) else 0,
+            }
+        )
     if "case retrieval" in system_l:
         records = payload if isinstance(payload, list) else payload.get("records", [])
         records = [record for record in records if isinstance(record, dict)]
