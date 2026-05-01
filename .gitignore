@@ -16,6 +16,13 @@ venv/
 artifacts/
 experiments/
 retailhero-uplift/
+
+# Pipeline runtime output (generated during runs, not source)
+pipeline/logs/
+pipeline/trials/
+
+# Un-ignore the Skills prompt stubs (gitignore has skills/ which is case-insensitive on macOS)
+!pipeline/Skills/
 retailhero-uplift.zip
 *.zip
 *.pkl
