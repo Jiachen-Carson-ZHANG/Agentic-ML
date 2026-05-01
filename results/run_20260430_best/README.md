@@ -5,7 +5,7 @@
 - Selection rule: validation predictions choose top 3; 5-fold CV reranks those candidates on the original train+validation pool only; the internal test partition is sealed until final audit.
 - CV mean normalized Qini: **0.396226**
 - Sealed held-out raw Qini: **309.99**
-- Human notebook comparison: strict AutoLift held-out raw Qini **309.99** vs best `human_baseline_uplift.ipynb` held-out row **328.39**. AutoLift is ahead on held-out uplift@5%, but not on raw Qini, uplift AUC, or most top-k lift rates.
+- Human notebook comparison: **pending re-audit**. The existing `human_baseline_uplift.ipynb` numbers are provisional because the human baseline workflow is being corrected separately. Do not use the current human deltas as final claims.
 
 **Retrospective held-out best reference:** `RUN-c5e6e86f`
 - Held-out raw Qini: **331.77**
@@ -50,11 +50,11 @@ Switching from `rfm_baseline` (27k pre-issue transactions) to `hybrid_safe_seman
 pure demographics (`age_clean` only) to include behavioral signals
 (`days_to_first_redeem`, `points_received_total_30d`).
 
-Against the real human notebook comparison, the leakage-clean selected AutoLift
-candidate is not the raw-Qini winner: 309.99 vs 328.39 raw Qini. It is ahead on
-held-out uplift@5%, but the human notebook remains ahead on held-out uplift AUC
-and most top-k lift rates. The performance claim should be precise rather than
-exaggerated.
+The AutoLift side is now leakage-clean: top-3 candidates are selected from
+validation evidence and reranked by CV without using the internal test partition.
+The human-baseline comparison is pending because the human notebook workflow is
+being corrected separately. Until that lands, avoid claiming win/loss against the
+human baseline.
 
 The agent story should emphasize the end-to-end workflow: it generated trials,
 tuned deterministically, detected the held-out leakage risk, reran a

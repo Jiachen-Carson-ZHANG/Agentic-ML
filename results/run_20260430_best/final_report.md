@@ -6,7 +6,7 @@ Task: retailhero-uplift
 
 Use `RUN-f1c30175` as the leakage-clean validation+CV selected AutoLift candidate. Selection was made without internal test/held-out metrics: first rank by validation predictions, then rerank the top 3 with 5-fold CV over the original train+validation pool only. The internal test partition stayed sealed until the final audit.
 
-Important boundary: `RUN-c5e6e86f` remains the best retrospective held-out main-run row, but it must not be described as the leakage-clean selected champion because the earlier champion logic considered held-out performance. The performance story is therefore more conservative: the strict validation+CV candidate is competitive and auditable, but it does not beat the human notebook on held-out raw Qini.
+Important boundary: `RUN-c5e6e86f` remains the best retrospective held-out main-run row, but it must not be described as the leakage-clean selected champion because the earlier champion logic considered held-out performance. The human-baseline comparison is pending re-audit because the human notebook workflow is being corrected separately; do not use current human deltas as final claims.
 
 ## Leakage-Clean Validation+CV Selection
 
@@ -52,7 +52,11 @@ This row is useful for diagnosis and comparison, but not for leakage-clean champ
 
 Source: `human_baseline_uplift.ipynb`
 
-Best held-out human notebook row: `class_transform_gbm` / `tuned_class_transform_gbm`
+Status: pending re-audit. The values below are retained only as the previously
+observed notebook outputs and must not be treated as final comparison numbers
+until the corrected human-baseline workflow is pushed and rerun.
+
+Previously observed best held-out human notebook row: `class_transform_gbm` / `tuned_class_transform_gbm`
 
 - Held-out Qini AUC: 328.3899
 - Held-out Uplift AUC: 0.0631
@@ -61,7 +65,7 @@ Best held-out human notebook row: `class_transform_gbm` / `tuned_class_transform
 - Held-out Uplift@20%: 0.0764
 - Held-out Uplift@30%: 0.0627
 
-Notebook-selected validation champion: `tuned_solo_model_xgb`
+Previously observed notebook-selected validation champion: `tuned_solo_model_xgb`
 
 - Validation Qini AUC: 367.03263
 - Held-out Test Qini AUC: 299.13056
@@ -69,7 +73,9 @@ Notebook-selected validation champion: `tuned_solo_model_xgb`
 - Held-out Test Uplift@10%: 0.12779
 - Held-out Test Uplift@30%: 0.05242
 
-For slide/report comparison, use the best held-out human notebook row above. The notebook-selected validation champion is listed for traceability, but it is not the strongest human held-out test result.
+For slide/report comparison, treat the human-baseline column as pending. The
+notebook-selected validation champion is listed for traceability, but the final
+human benchmark should come from the corrected human-baseline run.
 
 ## Internal AutoLift Reference
 
@@ -91,11 +97,14 @@ For slide/report comparison, use the best held-out human notebook row above. The
 | RUN-dd10fc91 | Agent | two_model | lightgbm | 0.407684 | 0.065052 | 0.208495 | 0.056286 |
 | RUN-c5e6e86f | Agent | class_transformation | lightgbm | 0.344842 | 0.060678 | 0.337369 | 0.061490 |
 
-## Human vs AutoLift Comparison
+## Human vs AutoLift Comparison Pending
 
-Strict leakage-clean selection:
+The AutoLift side below is final for this audit. The human side is provisional
+and must be refreshed after the corrected human-baseline code is pushed.
 
-| Metric | AutoLift Validation+CV Candidate | Human Notebook Best Held-out Row | Delta |
+Strict leakage-clean selection versus previously observed human numbers:
+
+| Metric | AutoLift Validation+CV Candidate | Provisional Human Notebook Row | Provisional Delta |
 |---|---:|---:|---:|
 | Held-out raw Qini AUC | 309.9871 | 328.3899 | -18.4028 |
 | Held-out uplift AUC | 0.058746 | 0.0631 | -0.004354 |
@@ -104,9 +113,9 @@ Strict leakage-clean selection:
 | Held-out uplift@20% | 0.064553 | 0.0764 | -0.011847 |
 | Held-out uplift@30% | 0.058085 | 0.0627 | -0.004615 |
 
-Retrospective held-out best reference:
+Retrospective held-out best reference versus previously observed human numbers:
 
-| Metric | AutoLift Retrospective Best | Human Notebook Best Held-out Row | Delta |
+| Metric | AutoLift Retrospective Best | Provisional Human Notebook Row | Provisional Delta |
 |---|---:|---:|---:|
 | Held-out raw Qini AUC | 331.7694 | 328.3899 | +3.3795 |
 | Held-out uplift AUC | 0.06149 | 0.0631 | -0.00161 |
@@ -115,7 +124,11 @@ Retrospective held-out best reference:
 | Held-out uplift@20% | 0.071709 | 0.0764 | -0.004691 |
 | Held-out uplift@30% | 0.062456 | 0.0627 | -0.000244 |
 
-Interpretation: the strict validation+CV candidate does not beat the human notebook on held-out raw Qini, uplift AUC, or most top-k lift metrics, although it is stronger at uplift@5%. The honest claim is not universal performance dominance. The stronger contribution is that AutoLift produced an auditable end-to-end agentic workflow, generated candidate families and tuning plans, detected its own leakage risk, and preserved reasoning and artifacts for review.
+Interpretation: do not claim a final win/loss against the human baseline until
+the corrected human-baseline run is available. The current defensible claim is
+about AutoLift's own process: it produced an auditable end-to-end agentic
+workflow, generated candidate families and tuning plans, detected its own
+leakage risk, and preserved reasoning and artifacts for review.
 
 ## Agentic Tuning Audit
 
